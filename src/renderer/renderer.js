@@ -298,38 +298,64 @@ async function startLive() {
   if (selectedSonosRooms().length) refreshSonosStream();
 }
 
-/** @param {Channel} ch */
+/**
+ * Build a speaker's live AudioContext. A fresh context has its own, non-
+ * deterministic output latency, so we build it ONCE and keep it (see
+ * disableLiveNode) — recreating it on every toggle is what threw speakers out of
+ * sync even with an unchanged Delay comp. Guarded against concurrent builds.
+ * @param {Channel} ch
+ */
 async function buildLiveNode(ch) {
-  if (!liveStream || ch.live) return;
-  const ctx = new AudioContext({ latencyHint: 'playback' });
-  try {
-    if (typeof ctx.setSinkId === 'function') await ctx.setSinkId(ch.info.deviceId);
-  } catch (err) {
-    setStatus(`Could not route to "${ch.info.label}": ${err.message}`);
-  }
-  const src = ctx.createMediaStreamSource(liveStream);
-  const filter = ctx.createBiquadFilter();
-  filter.type = 'lowshelf';
-  filter.frequency.value = BASS_FREQ;
-  filter.gain.value = ch.bass;
-  const delay = ctx.createDelay(MAX_DELAY);
-  const gain = ctx.createGain();
-  delay.delayTime.value = clampDelay(ch.offsetMs);
-  gain.gain.value = Math.min(1, ch.volume * masterVolume);
-  src.connect(filter);
-  filter.connect(delay);
-  delay.connect(gain);
-  gain.connect(ctx.destination);
-  await ctx.resume();
-  ch.live = { ctx, src, filter, delay, gain };
+  if (ch.live) return ch.live;
+  if (ch._liveP) return ch._liveP;
+  if (!liveStream) return null;
+  ch._liveP = (async () => {
+    const ctx = new AudioContext({ latencyHint: 'playback' });
+    try {
+      if (typeof ctx.setSinkId === 'function') await ctx.setSinkId(ch.info.deviceId);
+    } catch (err) {
+      setStatus(`Could not route to "${ch.info.label}": ${err.message}`);
+    }
+    const src = ctx.createMediaStreamSource(liveStream);
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'lowshelf';
+    filter.frequency.value = BASS_FREQ;
+    filter.gain.value = ch.bass;
+    const delay = ctx.createDelay(MAX_DELAY);
+    const gain = ctx.createGain();
+    delay.delayTime.value = clampDelay(ch.offsetMs);
+    // If the speaker was toggled back off while this async build was running,
+    // come up muted so we don't leak audio to a disabled speaker.
+    gain.gain.value = ch.enabled ? Math.min(1, ch.volume * masterVolume) : 0;
+    src.connect(filter);
+    filter.connect(delay);
+    delay.connect(gain);
+    gain.connect(ctx.destination);
+    await ctx.resume();
+    ch.live = { ctx, src, filter, delay, gain };
+    ch._liveP = null;
+    return ch.live;
+  })();
+  return ch._liveP;
 }
 
-/** @param {Channel} ch */
+/**
+ * Disable a live speaker WITHOUT destroying its context — just mute it. The
+ * context keeps running at a fixed latency/phase, so re-enabling it stays in
+ * sync with the others (no re-tuning of Delay comp needed).
+ * @param {Channel} ch
+ */
+function disableLiveNode(ch) {
+  if (ch.live) ch.live.gain.gain.value = 0;
+}
+
+/** Fully destroy a live node's context — only when stopping Live entirely. */
 function teardownLiveNode(ch) {
   if (!ch.live) return;
   try { ch.live.src.disconnect(); ch.live.filter.disconnect(); ch.live.gain.disconnect(); ch.live.delay.disconnect(); } catch {}
   ch.live.ctx.close().catch(() => {});
   ch.live = null;
+  ch._liveP = null;
 }
 
 function stopLive() {
@@ -473,7 +499,8 @@ function applyChannelVolume(ch) {
   const v = effectiveVol(ch);
   if (ch.fileGraph) { ch.fileGraph.gain.gain.value = v; ch.audio.volume = 1; }
   else ch.audio.volume = v;
-  if (ch.live) ch.live.gain.gain.value = v;
+  // A live node kept alive while disabled stays muted (preserves its phase).
+  if (ch.live) ch.live.gain.gain.value = ch.enabled ? v : 0;
 }
 
 function applyVolumes() {
@@ -627,8 +654,11 @@ async function onToggleDevice(ch, cb, li) {
   li.classList.toggle('active', ch.enabled);
 
   if (mode === 'live') {
-    if (ch.enabled && isPlaying && liveStream) await buildLiveNode(ch);
-    else if (!ch.enabled) teardownLiveNode(ch);
+    if (ch.enabled) {
+      if (isPlaying && liveStream) { await buildLiveNode(ch); applyChannelVolume(ch); }
+    } else {
+      disableLiveNode(ch); // mute, keep the context alive to preserve sync
+    }
     return;
   }
 
