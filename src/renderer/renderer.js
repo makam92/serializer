@@ -39,6 +39,10 @@ const el = {
   inputMeter: document.getElementById('inputMeter'),
   meterFill: document.getElementById('meterFill'),
   meterDb: document.getElementById('meterDb'),
+  btnFindSonos: document.getElementById('btnFindSonos'),
+  sonosHint: document.getElementById('sonosHint'),
+  sonosControls: document.getElementById('sonosControls'),
+  sonosList: document.getElementById('sonosList'),
 };
 
 // ---- State ----
@@ -99,6 +103,9 @@ function persistPrefs() {
   }
   try { localStorage.setItem(PREFS_KEY, JSON.stringify(out)); } catch {}
 }
+// Persistence is blocking (synchronous localStorage); never run it on a slider's
+// per-`input` hot path — debounce so it fires only after dragging settles.
+const schedulePersist = debounce(persistPrefs, 400);
 
 // ---- Helpers ----
 function fmtTime(sec) {
@@ -108,6 +115,29 @@ function fmtTime(sec) {
   return `${m}:${String(s).padStart(2, '0')}`;
 }
 function setStatus(msg) { el.status.textContent = msg; }
+
+/** Rate-limit a function to at most once per `ms`, with a trailing call. */
+function throttle(fn, ms) {
+  let last = 0; let timer = null; let lastArgs;
+  return (...args) => {
+    lastArgs = args;
+    const now = performance.now();
+    const remaining = ms - (now - last);
+    if (remaining <= 0) { last = now; fn(...args); }
+    else if (!timer) {
+      timer = setTimeout(() => { last = performance.now(); timer = null; fn(...lastArgs); }, remaining);
+    }
+  };
+}
+
+/** Run `fn` only after `ms` of quiet — keeps blocking work off the drag hot path. */
+function debounce(fn, ms) {
+  let timer = null;
+  return (...args) => {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => { timer = null; fn(...args); }, ms);
+  };
+}
 function enabledChannels() { return [...channels.values()].filter((c) => c.enabled); }
 
 /** First enabled, loaded file-mode element — the reference clock. */
@@ -243,7 +273,10 @@ async function applySink(ch) {
 // ---- LIVE mode: capture an input and route to each speaker ----
 async function startLive() {
   const active = enabledChannels();
-  if (!active.length) { setStatus('Select at least one speaker first.'); return; }
+  if (!active.length && !selectedSonosRooms().length) {
+    setStatus('Select at least one speaker or Sonos room first.');
+    return;
+  }
 
   try {
     const audioConstraints = inputDeviceId
@@ -262,6 +295,7 @@ async function startLive() {
   el.btnPlay.textContent = '⏸ Pause';
   const inputName = el.inputSelect.options[el.inputSelect.selectedIndex]?.textContent || 'input';
   setStatus(`Live: routing "${inputName}" to ${active.length} speaker${active.length > 1 ? 's' : ''}.`);
+  if (selectedSonosRooms().length) refreshSonosStream();
 }
 
 /** @param {Channel} ch */
@@ -300,6 +334,7 @@ function teardownLiveNode(ch) {
 
 function stopLive() {
   stopMeter();
+  stopSonosStream();
   for (const ch of channels.values()) teardownLiveNode(ch);
   if (liveStream) { liveStream.getTracks().forEach((t) => t.stop()); liveStream = null; }
 }
@@ -453,7 +488,7 @@ function applyVolumes() {
  */
 async function setBass(ch, db) {
   ch.bass = db;
-  persistPrefs();
+  schedulePersist();
   if (ch.live && ch.live.filter) ch.live.filter.gain.value = db;
   if (ch.fileGraph) ch.fileGraph.filter.gain.value = db;
   else if (mode === 'file' && db !== 0) await ensureFileGraph(ch);
@@ -576,7 +611,7 @@ function renderDeviceRow(ch) {
   sliders.appendChild(sliderGroup('Volume', 0, 100, Math.round(ch.volume * 100), '%', (v) => {
     ch.volume = v / 100;
     applyChannelVolume(ch);
-    persistPrefs();
+    schedulePersist();
   }));
   sliders.appendChild(sliderGroup('Bass', 0, BASS_MAX_DB, ch.bass, ' dB', (v) => { setBass(ch, v); }));
   sliders.appendChild(delayControl(ch));
@@ -672,7 +707,7 @@ function delayControl(ch) {
     slider.value = String(v);
     num.value = String(v);
     if (ch.live) ch.live.delay.delayTime.value = clampDelay(v);
-    persistPrefs();
+    schedulePersist();
   };
 
   const nudge = (label, step) => {
@@ -719,4 +754,279 @@ el.seek.addEventListener('change', () => { seekTo(Number(el.seek.value) / 1000);
 
 navigator.mediaDevices.addEventListener('devicechange', scanDevices);
 
+// ---- Sonos (network) discovery + streaming ----
+/** @type {Array<{id:string, ip:string, roomName:string, model:string}>} */
+let sonosRooms = [];
+/** @type {Set<string>} enabled room ids */
+const sonosEnabled = new Set();
+/** @type {?{ctx: AudioContext, src: MediaStreamAudioSourceNode, delay: DelayNode, node: AudioNode, zero: GainNode}} */
+let sonosCapture = null;
+/** @type {?Promise<any>} guards against concurrent (async) capture builds */
+let sonosCaptureBuilding = null;
+
+// Group-wide delay applied to the audio we stream to Sonos (Sonos can only be
+// pushed later, so 0..SONOS_MAX_DELAY ms). Persisted across sessions.
+const SONOS_MAX_DELAY = 3000;
+const SONOS_DELAY_KEY = 'serializer.sonosDelay.v1';
+let sonosDelayMs = (() => {
+  const v = parseInt(localStorage.getItem(SONOS_DELAY_KEY) || '0', 10);
+  return isNaN(v) ? 0 : Math.max(0, Math.min(SONOS_MAX_DELAY, v));
+})();
+
+const persistSonosDelay = debounce(() => {
+  try { localStorage.setItem(SONOS_DELAY_KEY, String(sonosDelayMs)); } catch {}
+}, 400);
+function setSonosDelay(ms) {
+  sonosDelayMs = Math.max(0, Math.min(SONOS_MAX_DELAY, Math.round(ms)));
+  // Smooth ramp instead of a hard jump, so retiming mid-stream doesn't click.
+  if (sonosCapture && sonosCapture.delay) {
+    const t = sonosCapture.ctx.currentTime;
+    sonosCapture.delay.delayTime.setTargetAtTime(sonosDelayMs / 1000, t, 0.03);
+  }
+  persistSonosDelay();
+}
+
+/** @type {Array<{id:string, ip:string, roomName:string}>} rooms currently told to play */
+let sonosActive = [];
+function roomPayload(r) { return { id: r.id, ip: r.ip, roomName: r.roomName }; }
+// Insertion order (NOT alphabetical) keeps the group coordinator stable as rooms
+// are added — the first room ticked stays the coordinator.
+function selectedSonosRooms() {
+  return [...sonosEnabled].map((id) => sonosRooms.find((r) => r.id === id)).filter(Boolean);
+}
+
+/**
+ * Tap the live BlackHole stream, downmix/convert to 16-bit stereo PCM at 44.1 kHz,
+ * and ship each block to the main process (which fans it out to the Sonos clients).
+ * Connected through a zero-gain node so it drives the graph without making sound.
+ */
+async function buildSonosCapture() {
+  if (sonosCapture) return sonosCapture;
+  if (sonosCaptureBuilding) return sonosCaptureBuilding;
+  if (!liveStream) return null;
+  sonosCaptureBuilding = (async () => {
+    const ctx = new AudioContext({ sampleRate: 44100 });
+    const src = ctx.createMediaStreamSource(liveStream);
+    const delay = ctx.createDelay(SONOS_MAX_DELAY / 1000);
+    delay.delayTime.value = sonosDelayMs / 1000;
+    const zero = ctx.createGain();
+    zero.gain.value = 0;
+
+    let node;
+    try {
+      // Preferred: capture on the audio thread, immune to main-thread jank.
+      await ctx.audioWorklet.addModule('sonos-capture-worklet.js');
+      node = new AudioWorkletNode(ctx, 'sonos-capture', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] });
+      node.port.onmessage = (e) => window.api.sendSonosPcm(e.data);
+    } catch (err) {
+      // Fallback: main-thread ScriptProcessor if the worklet can't load.
+      node = ctx.createScriptProcessor(4096, 2, 1);
+      node.onaudioprocess = (e) => {
+        const inp = e.inputBuffer;
+        const L = inp.getChannelData(0);
+        const R = inp.numberOfChannels > 1 ? inp.getChannelData(1) : L;
+        const pcm = new Int16Array(L.length * 2);
+        for (let i = 0; i < L.length; i++) {
+          const l = Math.max(-1, Math.min(1, L[i]));
+          const r = Math.max(-1, Math.min(1, R[i]));
+          pcm[i * 2] = l < 0 ? l * 0x8000 : l * 0x7fff;
+          pcm[i * 2 + 1] = r < 0 ? r * 0x8000 : r * 0x7fff;
+        }
+        window.api.sendSonosPcm(pcm.buffer);
+      };
+      console.warn('Sonos capture worklet unavailable, using ScriptProcessor:', err.message);
+    }
+
+    src.connect(delay);
+    delay.connect(node);
+    node.connect(zero);
+    zero.connect(ctx.destination);
+    await ctx.resume();
+    sonosCapture = { ctx, src, delay, node, zero };
+    sonosCaptureBuilding = null;
+    return sonosCapture;
+  })();
+  return sonosCaptureBuilding;
+}
+
+function teardownSonosCapture() {
+  if (!sonosCapture) return;
+  try {
+    if (sonosCapture.node.port) sonosCapture.node.port.onmessage = null;
+    if ('onaudioprocess' in sonosCapture.node) sonosCapture.node.onaudioprocess = null;
+    sonosCapture.src.disconnect();
+    sonosCapture.delay.disconnect();
+    sonosCapture.node.disconnect();
+    sonosCapture.zero.disconnect();
+  } catch {}
+  sonosCapture.ctx.close().catch(() => {});
+  sonosCapture = null;
+  sonosCaptureBuilding = null;
+}
+
+/**
+ * Re-sync the Sonos group to the current selection. The capture keeps running
+ * across changes (no gap), rooms dropped from the selection are ungrouped, and
+ * the rest are (re)grouped under a stable coordinator.
+ */
+async function refreshSonosStream() {
+  if (mode !== 'live' || !isPlaying || !liveStream) return;
+  const rooms = selectedSonosRooms();
+  if (!rooms.length) { await stopSonosStream(); return; }
+  await buildSonosCapture(); // no-op if already running
+  const keep = new Set(rooms.map((r) => r.id));
+  const removed = sonosActive.filter((r) => !keep.has(r.id));
+  if (removed.length) await window.api.sonosStop(removed.map(roomPayload));
+  const res = await window.api.sonosPlay(rooms.map(roomPayload));
+  sonosActive = rooms;
+  if (!res || !res.ok) setStatus(`Sonos error: ${(res && res.error) || 'failed'}`);
+  else setStatus(`Streaming to Sonos: ${rooms.map((r) => r.roomName).join(', ')}.`);
+}
+
+async function stopSonosStream() {
+  teardownSonosCapture();
+  if (sonosActive.length) await window.api.sonosStop(sonosActive.map(roomPayload));
+  sonosActive = [];
+}
+
+async function findSonos() {
+  if (!window.api || !window.api.discoverSonos) return;
+  el.btnFindSonos.disabled = true;
+  el.sonosHint.textContent = 'Searching your network for Sonos rooms…';
+  try {
+    sonosRooms = await window.api.discoverSonos();
+  } catch (err) {
+    sonosRooms = [];
+    el.sonosHint.textContent = `Sonos search failed: ${err.message}`;
+    el.btnFindSonos.disabled = false;
+    return;
+  }
+  renderSonos();
+  el.btnFindSonos.disabled = false;
+}
+
+function renderSonos() {
+  el.sonosList.innerHTML = '';
+  if (!sonosRooms.length) {
+    el.sonosHint.textContent = 'No Sonos rooms found. Make sure they’re powered on and on the same network, then press Find Sonos.';
+    return;
+  }
+  el.sonosHint.textContent = `${sonosRooms.length} Sonos room${sonosRooms.length > 1 ? 's' : ''} found. Tick rooms and use 🎙 Live input to broadcast to them.`;
+  mountSonosControls();
+  for (const room of sonosRooms) el.sonosList.appendChild(renderSonosRow(room));
+}
+
+/** One-time mount of the group-wide delay control above the room list. */
+function mountSonosControls() {
+  if (el.sonosControls.childElementCount) { el.sonosControls.hidden = false; return; }
+  const label = document.createElement('span');
+  label.className = 'sonos-controls-label';
+  label.textContent = 'Group delay';
+  el.sonosControls.appendChild(label);
+  el.sonosControls.appendChild(sonosDelayControl());
+  el.sonosControls.hidden = false;
+}
+
+/** Delay + nudge for the whole Sonos group (0..SONOS_MAX_DELAY ms, add-only). */
+function sonosDelayControl() {
+  const g = document.createElement('div');
+  g.className = 'slider-group delay-group';
+
+  const slider = document.createElement('input');
+  slider.type = 'range';
+  slider.min = '0'; slider.max = String(SONOS_MAX_DELAY); slider.step = '10';
+  slider.value = String(sonosDelayMs);
+
+  const num = document.createElement('input');
+  num.type = 'number';
+  num.className = 'delay-num';
+  num.min = '0'; num.max = String(SONOS_MAX_DELAY); num.step = '10';
+  num.value = String(sonosDelayMs);
+
+  const unit = document.createElement('span');
+  unit.className = 'val';
+  unit.textContent = 'ms';
+
+  const apply = (v) => {
+    setSonosDelay(v);
+    slider.value = String(sonosDelayMs);
+    num.value = String(sonosDelayMs);
+  };
+  const nudge = (text, step) => {
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'nudge'; b.textContent = text;
+    b.addEventListener('click', () => apply(sonosDelayMs + step));
+    return b;
+  };
+  slider.addEventListener('input', () => apply(Number(slider.value)));
+  num.addEventListener('input', () => apply(Number(num.value)));
+
+  g.appendChild(nudge('−100', -100));
+  g.appendChild(nudge('−10', -10));
+  g.appendChild(num);
+  g.appendChild(unit);
+  g.appendChild(nudge('+10', 10));
+  g.appendChild(nudge('+100', 100));
+  g.appendChild(slider);
+  return g;
+}
+
+function renderSonosRow(room) {
+  const li = document.createElement('li');
+  li.className = 'device sonos-device' + (sonosEnabled.has(room.id) ? ' active' : '');
+
+  const enableWrap = document.createElement('div');
+  enableWrap.className = 'dev-enable';
+  const cb = document.createElement('input');
+  cb.type = 'checkbox';
+  cb.checked = sonosEnabled.has(room.id);
+  cb.addEventListener('change', () => onToggleSonos(room, cb, li));
+  enableWrap.appendChild(cb);
+
+  const main = document.createElement('div');
+  main.className = 'dev-main';
+  const name = document.createElement('div');
+  name.className = 'dev-name';
+  name.textContent = room.roomName;
+  const badge = document.createElement('span');
+  badge.className = 'badge';
+  badge.textContent = room.model;
+  name.appendChild(badge);
+  main.appendChild(name);
+
+  const sub = document.createElement('div');
+  sub.className = 'dev-sub';
+  sub.textContent = `${room.ip} · ${room.model}`;
+  main.appendChild(sub);
+
+  // Native Sonos volume + bass, applied over the network (per room).
+  const sliders = document.createElement('div');
+  sliders.className = 'dev-sliders';
+  const pushVol = throttle((v) => window.api.sonosSetVolume(room.ip, v), 80);
+  sliders.appendChild(sliderGroup('Volume', 0, 100, room.volume, '%', (v) => { room.volume = v; pushVol(v); }));
+  const pushBass = throttle((v) => window.api.sonosSetBass(room.ip, v), 80);
+  sliders.appendChild(sliderGroup('Bass', -10, 10, room.bass, '', (v) => { room.bass = v; pushBass(v); }));
+  main.appendChild(sliders);
+
+  li.appendChild(enableWrap);
+  li.appendChild(main);
+  return li;
+}
+
+async function onToggleSonos(room, cb, li) {
+  if (cb.checked) sonosEnabled.add(room.id);
+  else sonosEnabled.delete(room.id);
+  li.classList.toggle('active', cb.checked);
+
+  // Re-form the Sonos group if we're already broadcasting live.
+  if (mode === 'live' && isPlaying) {
+    await refreshSonosStream();
+  } else if (cb.checked) {
+    setStatus('Switch to 🎙 Live input and press Start to broadcast to Sonos.');
+  }
+}
+
+el.btnFindSonos.addEventListener('click', findSonos);
+
 scanDevices();
+findSonos();

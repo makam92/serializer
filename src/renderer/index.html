@@ -75,6 +75,17 @@
         <p class="hint" id="devicesHint">Scanning for audio outputs…</p>
         <ul class="device-list" id="deviceList"></ul>
       </section>
+
+      <!-- Sonos (network) -->
+      <section class="panel devices">
+        <div class="devices-head">
+          <h2>Sonos <span class="net-tag">network</span></h2>
+          <button id="btnFindSonos" class="btn btn-ghost">↻ Find Sonos</button>
+        </div>
+        <p class="hint" id="sonosHint">Searching your network for Sonos rooms…</p>
+        <div class="sonos-controls" id="sonosControls" hidden></div>
+        <ul class="device-list" id="sonosList"></ul>
+      </section>
     </main>
 
     <footer class="status" id="status">Ready.</footer>

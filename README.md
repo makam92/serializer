@@ -60,6 +60,10 @@ npm run dev
   (type / nudge / drag), all **saved between sessions**
 - Master transport & continuous drift sync, plus an **input level meter** in Live mode
   to confirm signal is flowing
+- **Sonos (network)** — discovers Sonos rooms on your LAN and broadcasts your Live
+  audio to them, even across VLANs. Multiple rooms play grouped in tight sync, with
+  per-room **volume** / **bass** and a group-wide **delay** — all over the network
+  (see below)
 
 ### Broadcasting browser / system audio (Live mode)
 
@@ -75,8 +79,23 @@ macOS doesn't let apps tap system output directly, so use a virtual loopback dev
 > Live audio has a small inherent latency, and **Delay comp** can only *add* delay in
 > live mode — align the faster speakers down to the slowest one.
 
+### Sonos over the network (Live mode)
+
+Sonos players don't appear as OS audio devices, so Serializer talks to them directly:
+it discovers rooms via mDNS (works even when the Mac and Sonos sit on different
+subnets/VLANs, via your network's Bonjour reflector), then streams the live capture to
+them over HTTP and drives them with UPnP. Tick the rooms under **Sonos · network** while
+in Live mode.
+
+- Multiple rooms are **grouped** so they stay in tight sync with each other.
+- Per-room **volume** and **bass** use Sonos's own controls (over the network).
+- A group-wide **delay** nudges the whole Sonos set's timing.
+
+> Sonos buffers on its own clock, so Sonos-vs-*local*-speaker timing is loose (~1–2 s);
+> Sonos-to-Sonos is tight. Streaming to Sonos is Live-mode only.
+
 **Planned (later phases):**
-- Chromecast & Sonos (network-protocol speakers via mDNS discovery + casting)
+- Chromecast & other network-protocol speakers (mDNS discovery + casting)
 - Native macOS 14.4+ Core Audio process taps (system capture with no driver)
 - Direct streaming-service SDKs (Spotify / Apple Music)
 - Playlist / queue
@@ -85,10 +104,13 @@ macOS doesn't let apps tap system output directly, so use a virtual loopback dev
 
 ```
 src/
-  main.js              Electron main process (window, file dialog, permissions)
-  preload.js           Secure bridge: file picker + file reading
+  main.js              Electron main process (window, file dialog, permissions, Sonos IPC)
+  preload.js           Secure bridge: file picker + file reading + Sonos control
+  sonos.js             Sonos discovery (mDNS + UPnP topology) and control
+  streamserver.js      HTTP server that streams live PCM to Sonos players
   renderer/
     index.html         UI
     styles.css         Styling
     renderer.js        Device discovery + multi-output sync engine
+    sonos-capture-worklet.js   Audio-thread PCM capture for the Sonos stream
 ```

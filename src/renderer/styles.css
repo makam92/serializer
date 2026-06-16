@@ -161,6 +161,21 @@ main {
   border-radius: 5px; padding: 1px 5px; margin-left: 8px; font-weight: 600;
 }
 
+.net-tag {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px;
+  color: var(--accent); border: 1px solid var(--accent-dim);
+  border-radius: 5px; padding: 1px 6px; margin-left: 8px; vertical-align: middle;
+}
+.sonos-device .dev-sub { color: var(--muted); font-size: 12px; margin-top: 3px; }
+
+.sonos-controls {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin: 0 0 12px; padding: 10px 12px;
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px;
+}
+.sonos-controls[hidden] { display: none; }
+.sonos-controls-label { color: var(--muted); font-size: 12px; }
+
 .dev-sliders { display: flex; gap: 18px; flex-wrap: wrap; align-items: center; }
 .slider-group { display: flex; align-items: center; gap: 8px; }
 .slider-group label { color: var(--muted); font-size: 11px; min-width: 64px; }
