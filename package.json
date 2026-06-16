@@ -1,0 +1,22 @@
+{
+  "name": "serializer",
+  "version": "0.1.0",
+  "description": "Play music to multiple speakers (Bluetooth, AirPlay, wired, built-in) at the same time, in sync.",
+  "main": "src/main.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --enable-logging"
+  },
+  "keywords": [
+    "audio",
+    "multi-speaker",
+    "multiroom",
+    "electron"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^33.0.0"
+  }
+}

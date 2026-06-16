@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="Content-Security-Policy"
+          content="default-src 'self'; media-src blob:; style-src 'self' 'unsafe-inline';" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Serializer — Play everywhere at once</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="brand">
+        <span class="brand-mark">◉))</span>
+        <h1>Serializer</h1>
+      </div>
+      <p class="tagline">One track, every speaker, in sync.</p>
+    </header>
+
+    <main>
+      <!-- Transport / now playing -->
+      <section class="panel transport">
+        <div class="source-row">
+          <div class="mode-toggle" role="tablist">
+            <button id="btnModeFile" class="seg active">📁 File</button>
+            <button id="btnModeLive" class="seg">🎙 Live input</button>
+          </div>
+          <select id="inputSelect" class="input-select" hidden></select>
+        </div>
+
+        <div class="now-playing">
+          <div class="np-title" id="trackTitle">No track loaded</div>
+          <div class="np-sub" id="trackSub">Choose an audio file to begin</div>
+        </div>
+
+        <div class="input-meter" id="inputMeter" hidden>
+          <span class="meter-label">Input</span>
+          <div class="meter-track">
+            <div class="meter-fill" id="meterFill"></div>
+          </div>
+          <span class="meter-db" id="meterDb">–∞ dB</span>
+        </div>
+
+        <div class="seek-row">
+          <span class="time" id="timeCurrent">0:00</span>
+          <input type="range" id="seek" min="0" max="1000" value="0" step="1" disabled />
+          <span class="time" id="timeTotal">0:00</span>
+        </div>
+
+        <div class="controls">
+          <button id="btnPick" class="btn">Open file…</button>
+          <div class="transport-buttons">
+            <button id="btnPlay" class="btn btn-primary" disabled>▶ Play</button>
+            <button id="btnStop" class="btn" disabled>■ Stop</button>
+          </div>
+          <div class="master-vol">
+            <label for="masterVol">Master</label>
+            <input type="range" id="masterVol" min="0" max="100" value="100" />
+          </div>
+        </div>
+
+        <p class="live-hint" id="liveHint" hidden>
+          To broadcast your <strong>browser / system audio</strong>: install the free
+          <strong>BlackHole</strong> driver, set your Mac's output to it (or a Multi-Output
+          Device so you still hear it), then pick <strong>BlackHole</strong> as the input above.
+        </p>
+      </section>
+
+      <!-- Devices -->
+      <section class="panel devices">
+        <div class="devices-head">
+          <h2>Output speakers</h2>
+          <button id="btnRescan" class="btn btn-ghost">↻ Rescan</button>
+        </div>
+        <p class="hint" id="devicesHint">Scanning for audio outputs…</p>
+        <ul class="device-list" id="deviceList"></ul>
+      </section>
+    </main>
+
+    <footer class="status" id="status">Ready.</footer>
+
+    <script type="module" src="renderer.js"></script>
+  </body>
+</html>
