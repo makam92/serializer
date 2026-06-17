@@ -70,7 +70,27 @@
       <section class="panel devices">
         <div class="devices-head">
           <h2>Output speakers</h2>
-          <button id="btnRescan" class="btn btn-ghost">↻ Rescan</button>
+          <div class="head-actions">
+            <span class="info-wrap">
+              <button id="btnAutoSync" class="btn btn-ghost">⊕ Auto-sync</button>
+              <span class="info-icon" tabindex="0" aria-label="How Auto-sync works">ⓘ
+                <span class="info-tip">
+                  <strong>Auto-sync</strong> measures each speaker for you. It plays a short
+                  test chirp on every ticked speaker — local ones <em>and</em> your ticked
+                  <strong>Sonos</strong> rooms — one at a time, and listens with your Mac’s
+                  <strong>microphone</strong> to time how long each takes to be heard. It then
+                  delays every speaker to match the slowest (usually Sonos): locals via their
+                  <strong>Delay comp</strong>, Sonos via the <strong>group delay</strong>.
+                  <br /><br />
+                  Tips: put the mic near your listening spot, keep the room quiet, and use the
+                  built-in mic (not BlackHole). Sonos takes a few extra seconds to measure. You
+                  can still fine-tune by ear afterward.
+                </span>
+              </span>
+            </span>
+            <button id="btnAutoSyncUndo" class="btn btn-ghost">↩ Reset delays</button>
+            <button id="btnRescan" class="btn btn-ghost">↻ Rescan</button>
+          </div>
         </div>
         <p class="hint" id="devicesHint">Scanning for audio outputs…</p>
         <ul class="device-list" id="deviceList"></ul>

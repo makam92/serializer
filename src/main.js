@@ -71,44 +71,61 @@ ipcMain.on('sonos:pcm', (_e, buf) => { if (streamServer) streamServer.writePcm(B
 // Current Sonos group, tracked so we can update it incrementally — adding or
 // removing a follower must NOT disturb the coordinator's stream (which would
 // re-buffer and knock the whole group out of sync with the local speakers).
-let sonosGroup = { coordId: null, followers: new Set() };
+let sonosGroup = { coordId: null, coordIp: null, followers: new Set() };
 
-ipcMain.handle('sonos:play', async (_e, rooms) => {
+// Serialize all Sonos group mutations — rapid play/stop must not interleave and
+// race on the shared sonosGroup state.
+let sonosQueue = Promise.resolve();
+function queueSonos(fn) {
+  const run = sonosQueue.then(fn, fn);
+  sonosQueue = run.catch(() => {});
+  return run;
+}
+
+ipcMain.handle('sonos:play', (_e, rooms) => queueSonos(async () => {
   if (!streamServer) return { ok: false, error: 'stream server not ready' };
   if (!rooms.length) return { ok: false, error: 'no rooms' };
   const url = `http://${streamServer.ip}:${streamServer.port}/live.wav`;
   const [coord, ...followers] = rooms;
+  const failures = [];
   try {
     // (Re)start the coordinator only when it actually changes.
     if (sonosGroup.coordId !== coord.id) {
+      // Stop the previous coordinator first, or it keeps streaming as a separate,
+      // out-of-sync group.
+      if (sonosGroup.coordIp) { try { await sonos.stop(sonosGroup.coordIp); } catch {} }
       await sonos.setUri(coord.ip, url, sonos.streamMetadata(url));
       await sonos.play(coord.ip);
-      sonosGroup = { coordId: coord.id, followers: new Set() };
+      sonosGroup = { coordId: coord.id, coordIp: coord.ip, followers: new Set() };
       console.log(`[sonos] coordinator → ${coord.roomName}`);
     }
-    // Group only followers that aren't already in the group (leaves the
-    // coordinator and existing members playing undisturbed).
+    // Group only followers not already in the group (leaves the coordinator and
+    // existing members undisturbed). One unreachable room can't abort the batch.
     for (const f of followers) {
-      if (!sonosGroup.followers.has(f.id)) {
+      if (sonosGroup.followers.has(f.id)) continue;
+      try {
         await sonos.setUri(f.ip, `x-rincon:${coord.id}`);
         sonosGroup.followers.add(f.id);
         console.log(`[sonos] + ${f.roomName} joined ${coord.roomName}`);
+      } catch (e) {
+        failures.push(f.roomName);
+        console.log(`[sonos] ! ${f.roomName} failed to join: ${e.message}`);
       }
     }
-    return { ok: true, url, coordinator: coord.roomName };
+    return { ok: true, url, coordinator: coord.roomName, failures };
   } catch (e) { return { ok: false, error: e.message }; }
-});
+}));
 
-ipcMain.handle('sonos:stop', async (_e, rooms) => {
+ipcMain.handle('sonos:stop', (_e, rooms) => queueSonos(async () => {
   try {
     await sonos.stopAll(rooms);
     for (const r of rooms) {
       sonosGroup.followers.delete(r.id);
-      if (sonosGroup.coordId === r.id) sonosGroup = { coordId: null, followers: new Set() };
+      if (sonosGroup.coordId === r.id) sonosGroup = { coordId: null, coordIp: null, followers: new Set() };
     }
     return { ok: true };
   } catch (e) { return { ok: false, error: e.message }; }
-});
+}));
 
 ipcMain.handle('sonos:volume', async (_e, { ip, volume }) => {
   try { await sonos.setVolume(ip, volume); return { ok: true }; }
@@ -129,6 +146,7 @@ app.whenReady().then(async () => {
     const { ip, port } = await streamServer.start();
     console.log(`[stream] server listening on ${ip}:${port}`);
   } catch (e) { console.log('[stream] failed to start:', e.message); }
+
 
 
   app.on('activate', () => {

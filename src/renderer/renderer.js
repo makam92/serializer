@@ -29,6 +29,8 @@ const el = {
   btnStop: document.getElementById('btnStop'),
   masterVol: document.getElementById('masterVol'),
   btnRescan: document.getElementById('btnRescan'),
+  btnAutoSync: document.getElementById('btnAutoSync'),
+  btnAutoSyncUndo: document.getElementById('btnAutoSyncUndo'),
   devicesHint: document.getElementById('devicesHint'),
   deviceList: document.getElementById('deviceList'),
   status: document.getElementById('status'),
@@ -271,31 +273,41 @@ async function applySink(ch) {
 }
 
 // ---- LIVE mode: capture an input and route to each speaker ----
+let startingLive = false;
 async function startLive() {
+  if (startingLive) return; // guard against a double Start before the build finishes
   const active = enabledChannels();
   if (!active.length && !selectedSonosRooms().length) {
     setStatus('Select at least one speaker or Sonos room first.');
     return;
   }
-
+  startingLive = true;
   try {
-    const audioConstraints = inputDeviceId
-      ? { deviceId: { exact: inputDeviceId }, echoCancellation: false, noiseSuppression: false, autoGainControl: false }
-      : { echoCancellation: false, noiseSuppression: false, autoGainControl: false };
-    liveStream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
-  } catch (err) {
-    setStatus(`Could not open input: ${err.message}`);
-    return;
+    // On a fresh start, open the input. On Resume-from-pause the stream and the
+    // per-speaker contexts are still alive, so reuse them (preserves sync).
+    if (!liveStream) {
+      try {
+        const audioConstraints = inputDeviceId
+          ? { deviceId: { exact: inputDeviceId }, echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+          : { echoCancellation: false, noiseSuppression: false, autoGainControl: false };
+        liveStream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
+      } catch (err) {
+        setStatus(`Could not open input: ${err.message}`);
+        return;
+      }
+    }
+
+    for (const ch of active) { await buildLiveNode(ch); applyChannelVolume(ch); }
+    startMeter();
+
+    isPlaying = true;
+    el.btnPlay.textContent = '⏸ Pause';
+    const inputName = el.inputSelect.options[el.inputSelect.selectedIndex]?.textContent || 'input';
+    setStatus(`Live: routing "${inputName}" to ${active.length} speaker${active.length > 1 ? 's' : ''}.`);
+    if (selectedSonosRooms().length) refreshSonosStream();
+  } finally {
+    startingLive = false;
   }
-
-  for (const ch of active) await buildLiveNode(ch);
-  startMeter();
-
-  isPlaying = true;
-  el.btnPlay.textContent = '⏸ Pause';
-  const inputName = el.inputSelect.options[el.inputSelect.selectedIndex]?.textContent || 'input';
-  setStatus(`Live: routing "${inputName}" to ${active.length} speaker${active.length > 1 ? 's' : ''}.`);
-  if (selectedSonosRooms().length) refreshSonosStream();
 }
 
 /**
@@ -310,31 +322,39 @@ async function buildLiveNode(ch) {
   if (ch._liveP) return ch._liveP;
   if (!liveStream) return null;
   ch._liveP = (async () => {
-    const ctx = new AudioContext({ latencyHint: 'playback' });
+    let ctx;
     try {
-      if (typeof ctx.setSinkId === 'function') await ctx.setSinkId(ch.info.deviceId);
+      ctx = new AudioContext({ latencyHint: 'playback' });
+      try {
+        if (typeof ctx.setSinkId === 'function') await ctx.setSinkId(ch.info.deviceId);
+      } catch (err) {
+        setStatus(`Could not route to "${ch.info.label}": ${err.message}`);
+      }
+      const src = ctx.createMediaStreamSource(liveStream);
+      const filter = ctx.createBiquadFilter();
+      filter.type = 'lowshelf';
+      filter.frequency.value = BASS_FREQ;
+      filter.gain.value = ch.bass;
+      const delay = ctx.createDelay(MAX_DELAY);
+      const gain = ctx.createGain();
+      delay.delayTime.value = clampDelay(ch.offsetMs);
+      // If the speaker was toggled back off while this async build was running,
+      // come up muted so we don't leak audio to a disabled speaker.
+      gain.gain.value = ch.enabled ? Math.min(1, ch.volume * masterVolume) : 0;
+      src.connect(filter);
+      filter.connect(delay);
+      delay.connect(gain);
+      gain.connect(ctx.destination);
+      await ctx.resume();
+      ch.live = { ctx, src, filter, delay, gain };
+      return ch.live;
     } catch (err) {
-      setStatus(`Could not route to "${ch.info.label}": ${err.message}`);
+      if (ctx) ctx.close().catch(() => {});
+      setStatus(`Could not start "${ch.info.label}": ${err.message}`);
+      return null;
+    } finally {
+      ch._liveP = null; // always clear the guard, even on failure (so it can retry)
     }
-    const src = ctx.createMediaStreamSource(liveStream);
-    const filter = ctx.createBiquadFilter();
-    filter.type = 'lowshelf';
-    filter.frequency.value = BASS_FREQ;
-    filter.gain.value = ch.bass;
-    const delay = ctx.createDelay(MAX_DELAY);
-    const gain = ctx.createGain();
-    delay.delayTime.value = clampDelay(ch.offsetMs);
-    // If the speaker was toggled back off while this async build was running,
-    // come up muted so we don't leak audio to a disabled speaker.
-    gain.gain.value = ch.enabled ? Math.min(1, ch.volume * masterVolume) : 0;
-    src.connect(filter);
-    filter.connect(delay);
-    delay.connect(gain);
-    gain.connect(ctx.destination);
-    await ctx.resume();
-    ch.live = { ctx, src, filter, delay, gain };
-    ch._liveP = null;
-    return ch.live;
   })();
   return ch._liveP;
 }
@@ -437,6 +457,7 @@ async function play() {
   const ref = referenceChannel() || active[0];
   const base = ref.audio.currentTime;
   for (const ch of active) {
+    if (ch === ref) continue; // reference is the timing anchor — matches syncTick
     const target = base - ch.offsetMs / 1000; // +offset = play earlier content = come out later
     if (Math.abs(ch.audio.currentTime - target) > 0.02) ch.audio.currentTime = Math.max(0, target);
   }
@@ -448,7 +469,18 @@ async function play() {
 }
 
 function pause() {
-  if (mode === 'live') { stopLive(); isPlaying = false; el.btnPlay.textContent = '▶ Start'; setStatus('Live stopped.'); return; }
+  if (mode === 'live') {
+    // Pause WITHOUT tearing down: mute the live nodes but keep their contexts
+    // running so latency/phase stay fixed and Resume comes back in sync. (Stop,
+    // via the Stop button, does the full teardown.)
+    for (const ch of channels.values()) if (ch.live) ch.live.gain.gain.value = 0;
+    stopMeter();
+    stopSonosStream();
+    isPlaying = false;
+    el.btnPlay.textContent = '▶ Start';
+    setStatus('Live paused.');
+    return;
+  }
   for (const ch of channels.values()) ch.audio.pause();
   isPlaying = false;
   el.btnPlay.textContent = '▶ Play';
@@ -469,7 +501,12 @@ function togglePlay() { if (isPlaying) pause(); else play(); }
 
 function seekTo(fraction) {
   const t = fraction * durationSec;
-  for (const ch of channels.values()) ch.audio.currentTime = Math.max(0, t - ch.offsetMs / 1000);
+  const ref = referenceChannel();
+  for (const ch of channels.values()) {
+    // Anchor the reference at t (no self-offset), others compensated — matches syncTick.
+    const target = ch === ref ? t : t - ch.offsetMs / 1000;
+    ch.audio.currentTime = Math.max(0, target);
+  }
   el.timeCurrent.textContent = fmtTime(t);
 }
 
@@ -764,8 +801,262 @@ function delayControl(ch) {
   return g;
 }
 
+// ---- Auto-sync: measure each speaker's latency with the mic, set Delay comp ----
+//
+// Plays a short log-sweep "chirp" on one speaker at a time, records it through the
+// Mac's microphone, and cross-correlates the recording against the known chirp to
+// find when it arrived. The mic's own latency is constant across speakers, so it
+// cancels out — only the RELATIVE differences matter. We then delay every speaker
+// to match the slowest, writing the result into each Delay comp.
+let autoSyncing = false;
+/** @type {?{local: Array<{ch: Channel, offsetMs: number}>, sonos: number}} */
+let autoSyncBackup = null;
+const CHIRP_SEC = 0.15;
+const WARMUP_SEC = 1.0;     // quiet pre-roll to wake Bluetooth links before the chirp
+const LOCAL_REC_SEC = 3.0;  // warm-up + high-latency device + chirp + margin
+const SONOS_REC_SEC = 3.5;  // Sonos buffers ~1.5–2 s, so record longer
+
+/** Fill an array with a windowed 800 Hz→6 kHz sweep at `sampleRate`. */
+function fillChirp(arr, sampleRate, durSec) {
+  const n = arr.length;
+  const f0 = 800; const f1 = 6000; const k = (f1 - f0) / durSec;
+  for (let i = 0; i < n; i++) {
+    const t = i / sampleRate;
+    const phase = 2 * Math.PI * (f0 * t + 0.5 * k * t * t);
+    const w = 0.5 * (1 - Math.cos((2 * Math.PI * i) / n)); // Hann window
+    arr[i] = Math.sin(phase) * w * 0.5;
+  }
+}
+
+/** Chirp as 16-bit stereo PCM at `rate` (for injecting into the Sonos stream). */
+function makeChirpPcm(rate) {
+  const f = new Float32Array(Math.floor(rate * CHIRP_SEC));
+  fillChirp(f, rate, CHIRP_SEC);
+  const pcm = new Int16Array(f.length * 2);
+  for (let i = 0; i < f.length; i++) {
+    const s = f[i] < 0 ? f[i] * 0x8000 : f[i] * 0x7fff;
+    pcm[i * 2] = s; pcm[i * 2 + 1] = s;
+  }
+  return pcm;
+}
+
+async function pickMicDeviceId() {
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  const inputs = devices.filter((d) => d.kind === 'audioinput');
+  const real = inputs.find((d) => !/blackhole/i.test(d.label)); // avoid the loopback
+  return (real || inputs[0] || {}).deviceId || '';
+}
+
+/** Cross-correlate a recording against the chirp; return arrival lag in seconds. */
+function correlateLagSec(recorded, recRate, maxLagSec) {
+  const DOWN = 4;                    // decimate to speed up the correlation
+  const rate = recRate / DOWN;
+  const tn = Math.floor(rate * CHIRP_SEC);
+  const tmpl = new Float32Array(tn);
+  fillChirp(tmpl, rate, CHIRP_SEC);
+  const rn = Math.floor(recorded.length / DOWN);
+  const rec = new Float32Array(rn);
+  for (let i = 0; i < rn; i++) {
+    let s = 0; for (let j = 0; j < DOWN; j++) s += recorded[i * DOWN + j] || 0;
+    rec[i] = s / DOWN;
+  }
+  const maxLag = Math.min(rn - tn, Math.floor(rate * maxLagSec));
+  let bestLag = 0; let best = -Infinity;
+  for (let lag = 0; lag < maxLag; lag++) {
+    let sum = 0;
+    for (let j = 0; j < tn; j++) sum += tmpl[j] * rec[lag + j];
+    if (sum > best) { best = sum; bestLag = lag; }
+  }
+  return bestLag / rate;
+}
+
+/**
+ * Record the mic for `recSec`, calling `onStart()` the instant recording begins
+ * (that's the emit moment), then cross-correlate to find the chirp's arrival lag.
+ */
+async function recordAndMeasure(micStream, recSec, onStart) {
+  const recCtx = new AudioContext();
+  const micSrc = recCtx.createMediaStreamSource(micStream);
+  const proc = recCtx.createScriptProcessor(4096, 1, 1);
+  const chunks = [];
+  let recording = false;
+  proc.onaudioprocess = (e) => { if (recording) chunks.push(new Float32Array(e.inputBuffer.getChannelData(0))); };
+  const sink = recCtx.createGain(); sink.gain.value = 0;
+  micSrc.connect(proc); proc.connect(sink); sink.connect(recCtx.destination);
+  await recCtx.resume();
+
+  recording = true;
+  if (onStart) onStart();
+  await new Promise((r) => setTimeout(r, recSec * 1000));
+  recording = false;
+
+  let total = 0; for (const c of chunks) total += c.length;
+  const rec = new Float32Array(total);
+  let o = 0; for (const c of chunks) { rec.set(c, o); o += c.length; }
+  const recRate = recCtx.sampleRate;
+  try { proc.disconnect(); micSrc.disconnect(); sink.disconnect(); } catch {}
+  recCtx.close().catch(() => {});
+  return total ? correlateLagSec(rec, recRate, recSec - CHIRP_SEC - 0.1) : 0;
+}
+
+/**
+ * Local OS speaker: play [warm-up tone + chirp] via its own context and record
+ * via the mic. The warm-up wakes Bluetooth speakers (which mute the first moment
+ * of audio after silence) so the chirp actually comes out; we subtract its known
+ * length from the measured arrival.
+ */
+async function measureLocalLatencySec(ch, micStream) {
+  const playCtx = new AudioContext();
+  let routed = true;
+  try { if (playCtx.setSinkId) await playCtx.setSinkId(ch.info.deviceId); } catch { routed = false; }
+  if (!routed) setStatus(`Auto-sync: couldn't route to "${ch.info.label}".`);
+
+  const rate = playCtx.sampleRate;
+  const warmN = Math.floor(rate * WARMUP_SEC);
+  const chirpN = Math.floor(rate * CHIRP_SEC);
+  const buf = playCtx.createBuffer(1, warmN + chirpN, rate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < warmN; i++) data[i] = Math.sin((2 * Math.PI * 150 * i) / rate) * 0.15; // wake BT
+  const chirp = new Float32Array(chirpN);
+  fillChirp(chirp, rate, CHIRP_SEC);
+  data.set(chirp, warmN);
+
+  await playCtx.resume();
+  const lag = await recordAndMeasure(micStream, LOCAL_REC_SEC, () => {
+    const src = playCtx.createBufferSource();
+    src.buffer = buf; src.connect(playCtx.destination); src.start();
+  });
+  playCtx.close().catch(() => {});
+  return Math.max(0, lag - WARMUP_SEC); // chirp sits WARMUP_SEC into the buffer
+}
+
+/**
+ * Sonos: stream silence to the room until its buffer reaches steady state, then
+ * inject the chirp into that same live stream and time its arrival via the mic.
+ * Measures the real broadcast latency the live audio will experience.
+ */
+async function measureSonosLatencySec(room, micStream) {
+  const rate = 44100;
+  const silence = new Int16Array(Math.round(rate * 0.05) * 2); // 50 ms of zeros
+  const chirp = makeChirpPcm(rate);
+  const res = await window.api.sonosPlay([roomPayload(room)]);
+  if (!res || !res.ok) return null;
+  const feed = setInterval(() => window.api.sendSonosPcm(silence.buffer), 50);
+  try {
+    await new Promise((r) => setTimeout(r, 5000)); // let Sonos reach steady-state buffering
+    return await recordAndMeasure(micStream, SONOS_REC_SEC, () => window.api.sendSonosPcm(chirp.buffer));
+  } finally {
+    clearInterval(feed);
+    await window.api.sonosStop([roomPayload(room)]);
+  }
+}
+
+function refreshSonosControls() {
+  el.sonosControls.innerHTML = '';
+  mountSonosControls();
+}
+
+/**
+ * Reset delays. If an Auto-sync run is in memory, restore the values from just
+ * before it (a true undo). Otherwise clear ALL Delay comps + the Sonos group
+ * delay to 0 for a clean slate to re-tune from.
+ */
+function undoAutoSync() {
+  if (autoSyncBackup) {
+    for (const { ch, offsetMs } of autoSyncBackup.local) {
+      ch.offsetMs = offsetMs;
+      if (ch.live) ch.live.delay.delayTime.value = clampDelay(offsetMs);
+    }
+    setSonosDelay(autoSyncBackup.sonos);
+    autoSyncBackup = null;
+    setStatus('Reverted to your delays from before Auto-sync.');
+  } else {
+    for (const ch of channels.values()) {
+      ch.offsetMs = 0;
+      if (ch.live) ch.live.delay.delayTime.value = 0;
+    }
+    setSonosDelay(0);
+    setStatus('All delays reset to 0 — re-tune from scratch.');
+  }
+  refreshSonosControls();
+  persistPrefs();
+  renderDevices();
+  el.btnAutoSync.textContent = '⊕ Auto-sync';
+}
+
+async function autoSync() {
+  if (autoSyncing) return;
+  const locals = enabledChannels();
+  const rooms = selectedSonosRooms();
+  if (locals.length + rooms.length < 2) {
+    setStatus('Tick at least 2 speakers (Sonos counts), then Auto-sync.');
+    return;
+  }
+
+  autoSyncing = true;
+  el.btnAutoSync.disabled = true;
+  if (isPlaying) stop(); // don't measure over live playback
+
+  let micStream;
+  try {
+    const micId = await pickMicDeviceId();
+    const base = { echoCancellation: false, noiseSuppression: false, autoGainControl: false };
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: micId ? { deviceId: { exact: micId }, ...base } : base });
+  } catch (err) {
+    setStatus(`Auto-sync needs microphone access: ${err.message}`);
+    autoSyncing = false; el.btnAutoSync.disabled = false;
+    return;
+  }
+
+  try {
+    const local = [];
+    for (let i = 0; i < locals.length; i++) {
+      const ch = locals[i];
+      setStatus(`Auto-sync: measuring "${ch.info.label}" (${i + 1}/${locals.length})…`);
+      let lat = 0;
+      try { lat = await measureLocalLatencySec(ch, micStream); } catch { /* skip */ }
+      local.push({ ch, lat });
+      await new Promise((r) => setTimeout(r, 250)); // let echoes settle
+    }
+
+    // The Sonos rooms are grouped and tight, so one measurement (the coordinator)
+    // represents the whole group; the group delay then shifts them together.
+    let sonosLat = null;
+    if (rooms.length) {
+      setStatus('Auto-sync: measuring Sonos (this takes a few seconds)…');
+      try { sonosLat = await measureSonosLatencySec(rooms[0], micStream); } catch { /* skip */ }
+    }
+
+    // Snapshot the current delays BEFORE overwriting, so a bad run can be undone.
+    autoSyncBackup = {
+      local: local.map((r) => ({ ch: r.ch, offsetMs: r.ch.offsetMs })),
+      sonos: sonosDelayMs,
+    };
+
+    const allLats = local.map((r) => r.lat).concat(sonosLat != null ? [sonosLat] : []);
+    const maxLat = Math.max(...allLats);
+    for (const { ch, lat } of local) {
+      ch.offsetMs = Math.max(0, Math.min(DELAY_COMP_RANGE, Math.round((maxLat - lat) * 1000)));
+      if (ch.live) ch.live.delay.delayTime.value = clampDelay(ch.offsetMs);
+    }
+    if (sonosLat != null) { setSonosDelay(Math.round((maxLat - sonosLat) * 1000)); refreshSonosControls(); }
+
+    persistPrefs();
+    renderDevices();
+    const parts = local.map((r) => `${r.ch.info.label}: ${r.ch.offsetMs}ms`);
+    if (sonosLat != null) parts.push(`Sonos: ${sonosDelayMs}ms`);
+    setStatus(`Auto-sync done — ${parts.join(', ')}. Not better? Click “↩ Undo sync”.`);
+  } finally {
+    micStream.getTracks().forEach((t) => t.stop());
+    autoSyncing = false;
+    el.btnAutoSync.disabled = false;
+  }
+}
+
 // ---- Wire up UI ----
 el.btnPick.addEventListener('click', loadFile);
+el.btnAutoSync.addEventListener('click', autoSync);
+el.btnAutoSyncUndo.addEventListener('click', undoAutoSync);
 el.btnPlay.addEventListener('click', togglePlay);
 el.btnStop.addEventListener('click', stop);
 el.btnRescan.addEventListener('click', scanDevices);
@@ -835,46 +1126,54 @@ async function buildSonosCapture() {
   if (sonosCaptureBuilding) return sonosCaptureBuilding;
   if (!liveStream) return null;
   sonosCaptureBuilding = (async () => {
-    const ctx = new AudioContext({ sampleRate: 44100 });
-    const src = ctx.createMediaStreamSource(liveStream);
-    const delay = ctx.createDelay(SONOS_MAX_DELAY / 1000);
-    delay.delayTime.value = sonosDelayMs / 1000;
-    const zero = ctx.createGain();
-    zero.gain.value = 0;
-
-    let node;
+    let ctx;
     try {
-      // Preferred: capture on the audio thread, immune to main-thread jank.
-      await ctx.audioWorklet.addModule('sonos-capture-worklet.js');
-      node = new AudioWorkletNode(ctx, 'sonos-capture', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] });
-      node.port.onmessage = (e) => window.api.sendSonosPcm(e.data);
-    } catch (err) {
-      // Fallback: main-thread ScriptProcessor if the worklet can't load.
-      node = ctx.createScriptProcessor(4096, 2, 1);
-      node.onaudioprocess = (e) => {
-        const inp = e.inputBuffer;
-        const L = inp.getChannelData(0);
-        const R = inp.numberOfChannels > 1 ? inp.getChannelData(1) : L;
-        const pcm = new Int16Array(L.length * 2);
-        for (let i = 0; i < L.length; i++) {
-          const l = Math.max(-1, Math.min(1, L[i]));
-          const r = Math.max(-1, Math.min(1, R[i]));
-          pcm[i * 2] = l < 0 ? l * 0x8000 : l * 0x7fff;
-          pcm[i * 2 + 1] = r < 0 ? r * 0x8000 : r * 0x7fff;
-        }
-        window.api.sendSonosPcm(pcm.buffer);
-      };
-      console.warn('Sonos capture worklet unavailable, using ScriptProcessor:', err.message);
-    }
+      ctx = new AudioContext({ sampleRate: 44100 });
+      const src = ctx.createMediaStreamSource(liveStream);
+      const delay = ctx.createDelay(SONOS_MAX_DELAY / 1000);
+      delay.delayTime.value = sonosDelayMs / 1000;
+      const zero = ctx.createGain();
+      zero.gain.value = 0;
 
-    src.connect(delay);
-    delay.connect(node);
-    node.connect(zero);
-    zero.connect(ctx.destination);
-    await ctx.resume();
-    sonosCapture = { ctx, src, delay, node, zero };
-    sonosCaptureBuilding = null;
-    return sonosCapture;
+      let node;
+      try {
+        // Preferred: capture on the audio thread, immune to main-thread jank.
+        await ctx.audioWorklet.addModule('sonos-capture-worklet.js');
+        node = new AudioWorkletNode(ctx, 'sonos-capture', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] });
+        node.port.onmessage = (e) => window.api.sendSonosPcm(e.data);
+      } catch (err) {
+        // Fallback: main-thread ScriptProcessor if the worklet can't load.
+        node = ctx.createScriptProcessor(4096, 2, 1);
+        node.onaudioprocess = (e) => {
+          const inp = e.inputBuffer;
+          const L = inp.getChannelData(0);
+          const R = inp.numberOfChannels > 1 ? inp.getChannelData(1) : L;
+          const pcm = new Int16Array(L.length * 2);
+          for (let i = 0; i < L.length; i++) {
+            const l = Math.max(-1, Math.min(1, L[i]));
+            const r = Math.max(-1, Math.min(1, R[i]));
+            pcm[i * 2] = l < 0 ? l * 0x8000 : l * 0x7fff;
+            pcm[i * 2 + 1] = r < 0 ? r * 0x8000 : r * 0x7fff;
+          }
+          window.api.sendSonosPcm(pcm.buffer);
+        };
+        console.warn('Sonos capture worklet unavailable, using ScriptProcessor:', err.message);
+      }
+
+      src.connect(delay);
+      delay.connect(node);
+      node.connect(zero);
+      zero.connect(ctx.destination);
+      await ctx.resume();
+      sonosCapture = { ctx, src, delay, node, zero };
+      return sonosCapture;
+    } catch (err) {
+      if (ctx) ctx.close().catch(() => {});
+      setStatus(`Sonos audio capture failed: ${err.message}`);
+      return null;
+    } finally {
+      sonosCaptureBuilding = null; // clear the guard even on failure (allow retry)
+    }
   })();
   return sonosCaptureBuilding;
 }
@@ -1033,9 +1332,9 @@ function renderSonosRow(room) {
   const sliders = document.createElement('div');
   sliders.className = 'dev-sliders';
   const pushVol = throttle((v) => window.api.sonosSetVolume(room.ip, v), 80);
-  sliders.appendChild(sliderGroup('Volume', 0, 100, room.volume, '%', (v) => { room.volume = v; pushVol(v); }));
+  sliders.appendChild(sliderGroup('Volume', 0, 100, room.volume ?? 25, '%', (v) => { room.volume = v; pushVol(v); }));
   const pushBass = throttle((v) => window.api.sonosSetBass(room.ip, v), 80);
-  sliders.appendChild(sliderGroup('Bass', -10, 10, room.bass, '', (v) => { room.bass = v; pushBass(v); }));
+  sliders.appendChild(sliderGroup('Bass', -10, 10, room.bass ?? 0, '', (v) => { room.bass = v; pushBass(v); }));
   main.appendChild(sliders);
 
   li.appendChild(enableWrap);

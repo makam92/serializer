@@ -25,15 +25,13 @@ const { spawn } = require('node:child_process');
 
 const SONOS_HTTP_PORT = 1400;
 
-// Reuse TCP connections per player — slider drags fire many SetVolume/SetBass
-// SOAP calls, and a fresh socket per call would churn connections needlessly.
-const keepAliveAgent = new http.Agent({ keepAlive: true, maxSockets: 4, maxFreeSockets: 2 });
-
 // ---------------------------------------------------------------------------
 // HTTP helpers (unicast — works across subnets)
 // ---------------------------------------------------------------------------
+// NB: no keep-alive agent — Sonos/UPnP players close idle connections, so a
+// pooled stale socket gets reused and hangs until timeout. A fresh connection
+// per request is reliable (and request volume is already throttled).
 function httpRequest(options, body, timeoutMs = 3000) {
-  if (!options.agent) options.agent = keepAliveAgent;
   return new Promise((resolve, reject) => {
     const req = http.request(options, (res) => {
       let data = '';
@@ -183,10 +181,13 @@ function discoverSsdp(timeoutMs) {
       const m = msg.toString('utf8').match(/LOCATION:\s*(\S+)/i);
       if (!m || seen.has(m[1])) return;
       seen.add(m[1]);
-      pending.push(httpRequest({ ...new URL(m[1]), method: 'GET' }).then(({ body }) => {
+      // NB: a WHATWG URL has no own enumerable props, so {...new URL()} is {} —
+      // build the request options explicitly.
+      const u = new URL(m[1]);
+      pending.push(httpRequest({ host: u.hostname, port: u.port || 80, path: u.pathname + u.search, method: 'GET' }).then(({ body }) => {
         const room = tag(body, 'roomName') || tag(body, 'friendlyName');
         if (room && !byRoom.has(room)) {
-          byRoom.set(room, { id: tag(body, 'UDN').replace(/^uuid:/, ''), ip: new URL(m[1]).hostname, roomName: room, model: tag(body, 'modelName') || 'Sonos', location: m[1] });
+          byRoom.set(room, { id: tag(body, 'UDN').replace(/^uuid:/, ''), ip: u.hostname, roomName: room, model: tag(body, 'modelName') || 'Sonos', volume: 25, bass: 0, location: m[1] });
         }
       }).catch(() => {}));
     });

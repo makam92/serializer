@@ -134,6 +134,27 @@ main {
 /* Devices */
 .devices-head { display: flex; align-items: center; justify-content: space-between; }
 .devices-head h2 { margin: 0; font-size: 15px; font-weight: 600; }
+.head-actions { display: flex; align-items: center; gap: 8px; }
+
+.info-wrap { position: relative; display: inline-flex; align-items: center; gap: 4px; }
+.info-icon {
+  cursor: help; color: var(--muted); font-size: 13px; line-height: 1;
+  border-radius: 50%; outline: none;
+}
+.info-icon:hover, .info-icon:focus { color: var(--accent); }
+.info-tip {
+  position: absolute; top: calc(100% + 8px); right: 0; z-index: 20;
+  width: 300px; padding: 10px 12px;
+  background: var(--panel-2); color: var(--text);
+  border: 1px solid var(--border); border-left: 3px solid var(--accent-dim);
+  border-radius: 8px; font-size: 12px; line-height: 1.5; font-weight: 400;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  opacity: 0; visibility: hidden; transform: translateY(-4px);
+  transition: opacity 120ms ease, transform 120ms ease, visibility 120ms;
+}
+.info-tip strong { color: var(--accent); }
+.info-icon:hover .info-tip, .info-icon:focus .info-tip { opacity: 1; visibility: visible; transform: translateY(0); }
+.btn-ghost:disabled { opacity: 0.5; cursor: default; }
 .hint { color: var(--muted); font-size: 13px; margin: 8px 0 14px; }
 
 .device-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
