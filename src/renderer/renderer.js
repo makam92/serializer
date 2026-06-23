@@ -1,5 +1,7 @@
 'use strict';
 
+import { Visualizer } from './visualizer.js';
+
 /**
  * Serializer renderer.
  *
@@ -31,9 +33,17 @@ const el = {
   btnRescan: document.getElementById('btnRescan'),
   btnAutoSync: document.getElementById('btnAutoSync'),
   btnAutoSyncUndo: document.getElementById('btnAutoSyncUndo'),
+  btnViz: document.getElementById('btnViz'),
+  bgCanvas: document.getElementById('bgCanvas'),
+  vizOverlay: document.getElementById('vizOverlay'),
+  vizCanvas: document.getElementById('vizCanvas'),
+  vizClose: document.getElementById('vizClose'),
+  vizTitle: document.getElementById('vizTitle'),
   devicesHint: document.getElementById('devicesHint'),
   deviceList: document.getElementById('deviceList'),
   status: document.getElementById('status'),
+  transportStatus: document.getElementById('transportStatus'),
+  slateTc: document.getElementById('slateTc'),
   btnModeFile: document.getElementById('btnModeFile'),
   btnModeLive: document.getElementById('btnModeLive'),
   inputSelect: document.getElementById('inputSelect'),
@@ -67,7 +77,8 @@ const el = {
 /** @type {Map<string, Channel>} keyed by output deviceId */
 const channels = new Map();
 
-let mode = 'file'; // 'file' | 'live'
+let mode = 'file'; // 'file' | 'live' — the VIEWED tab
+let playMode = 'file'; // the mode whose playback is actually running (decoupled from the view)
 let currentObjectUrl = null;
 let trackName = '';
 let masterVolume = 1;
@@ -306,11 +317,13 @@ async function startLive() {
     startMeter();
 
     isPlaying = true;
+    playMode = 'live';
     el.btnPlay.textContent = '⏸ Pause';
     const inputName = el.inputSelect.options[el.inputSelect.selectedIndex]?.textContent || 'input';
     setStatus(`Live: routing "${inputName}" to ${active.length} speaker${active.length > 1 ? 's' : ''}.`);
     if (selectedSonosRooms().length) refreshSonosStream();
     if (selectedAirPlay().length) refreshAirPlayStream();
+    startBackdrop();
   } finally {
     startingLive = false;
   }
@@ -471,12 +484,15 @@ async function play() {
   await Promise.allSettled(active.map((ch) => ch.audio.play()));
 
   isPlaying = true;
+  playMode = 'file';
   el.btnPlay.textContent = '⏸ Pause';
   setStatus(`Playing on ${active.length} speaker${active.length > 1 ? 's' : ''}.`);
+  startBackdrop();
 }
 
 function pause() {
-  if (mode === 'live') {
+  stopBackdrop();
+  if (playMode === 'live') {
     // Pause WITHOUT tearing down: mute the live nodes but keep their contexts
     // running so latency/phase stay fixed and Resume comes back in sync. (Stop,
     // via the Stop button, does the full teardown.)
@@ -496,7 +512,8 @@ function pause() {
 }
 
 function stop() {
-  if (mode === 'live') { stopLive(); isPlaying = false; el.btnPlay.textContent = '▶ Start'; setStatus('Live stopped.'); return; }
+  stopBackdrop();
+  if (playMode === 'live') { stopLive(); isPlaying = false; el.btnPlay.textContent = '▶ Start'; setStatus('Live stopped.'); return; }
   for (const ch of channels.values()) { ch.audio.pause(); ch.audio.currentTime = 0; }
   isPlaying = false;
   el.btnPlay.textContent = '▶ Play';
@@ -520,7 +537,7 @@ function seekTo(fraction) {
 
 // ---- Sync loop (file mode only) ----
 function syncTick() {
-  if (mode !== 'file') return;
+  if (playMode !== 'file' || !isPlaying) return;
   const ref = referenceChannel();
   if (!ref) return;
   const base = ref.audio.currentTime;
@@ -613,10 +630,7 @@ function ensureFileGraph(ch) {
 // ---- Mode switching ----
 function setMode(next) {
   if (next === mode) return;
-  // Stop whatever is currently running before switching.
-  if (isPlaying) stop();
-  else stopLive();
-  mode = next;
+  mode = next; // this only switches the VIEW — playback (playMode) keeps running
 
   const live = mode === 'live';
   el.btnModeFile.classList.toggle('active', !live);
@@ -624,8 +638,12 @@ function setMode(next) {
   el.inputSelect.hidden = !live;
   el.liveHint.hidden = !live;
   el.btnPick.hidden = live;
-  el.seek.disabled = live;
 
+  // If something is playing, leave the transport/display alone — just changed tabs.
+  if (isPlaying) return;
+
+  playMode = next; // idle: the next Play uses the viewed mode
+  el.seek.disabled = live;
   if (live) {
     el.trackTitle.textContent = 'Live input';
     el.trackSub.textContent = 'Capture an input device and broadcast it live';
@@ -1061,8 +1079,109 @@ async function autoSync() {
   }
 }
 
+// ---- Visualizer (audio-reactive animation overlay) ----
+let visualizer = null;
+let vizCleanup = null;
+
+// Subtle backdrop behind the whole UI — only runs while audio is playing.
+let bgVisualizer = null;
+let bgCleanup = null;
+
+/** A non-invasive audio tap (won't reroute file playback): live stream or an
+ *  already-built file graph, else null (gentle idle drift). */
+function audioTapNonInvasive() {
+  if (liveStream) {
+    const ctx = new AudioContext();
+    const src = ctx.createMediaStreamSource(liveStream);
+    const an = ctx.createAnalyser();
+    src.connect(an);
+    return { analyser: an, cleanup: () => { try { src.disconnect(); } catch {} ctx.close().catch(() => {}); } };
+  }
+  const ref = referenceChannel();
+  if (ref && ref.fileGraph) {
+    const an = ref.fileGraph.ctx.createAnalyser();
+    ref.fileGraph.gain.connect(an);
+    return { analyser: an, cleanup: () => { try { ref.fileGraph.gain.disconnect(an); } catch {} } };
+  }
+  return { analyser: null, cleanup: null };
+}
+
+function startBackdrop() {
+  document.body.classList.add('is-playing'); // lights the tally lamps + Play bias glow
+  if (el.transportStatus) el.transportStatus.textContent = 'playing';
+  if (!el.vizOverlay.hidden) return; // fullscreen overlay is up; backdrop hidden anyway
+  if (!bgVisualizer) bgVisualizer = new Visualizer(el.bgCanvas, { background: true });
+  if (bgCleanup) { bgCleanup(); bgCleanup = null; }
+  el.bgCanvas.style.display = 'block';
+  const tap = audioTapNonInvasive();
+  bgCleanup = tap.cleanup;
+  bgVisualizer.start(tap.analyser);
+}
+function stopBackdrop() {
+  document.body.classList.remove('is-playing');
+  if (el.transportStatus) el.transportStatus.textContent = 'standby';
+  if (bgVisualizer) bgVisualizer.stop();
+  if (bgCleanup) { bgCleanup(); bgCleanup = null; }
+  el.bgCanvas.style.display = 'none'; // reveal the ambient background when idle
+}
+
+/** Tap whatever audio is currently playing so the visualizer can react to it. */
+async function makeVizAnalyser() {
+  if (liveStream) {
+    const ctx = new AudioContext();
+    const src = ctx.createMediaStreamSource(liveStream);
+    const an = ctx.createAnalyser();
+    src.connect(an);
+    vizCleanup = () => { try { src.disconnect(); } catch {} ctx.close().catch(() => {}); };
+    return an;
+  }
+  // File mode: tap the reference speaker's Web Audio graph (building it if needed
+  // so the visualizer reacts even when no bass boost is set).
+  if (mode === 'file' && currentObjectUrl) {
+    const ref = referenceChannel();
+    const graph = ref && (ref.fileGraph || await ensureFileGraph(ref));
+    if (graph) {
+      const an = graph.ctx.createAnalyser();
+      graph.gain.connect(an);
+      vizCleanup = () => { try { graph.gain.disconnect(an); } catch {} };
+      return an;
+    }
+  }
+  vizCleanup = null;
+  return null; // no audio source — visualizer runs an idle drift
+}
+
+async function openVisualizer() {
+  if (!visualizer) visualizer = new Visualizer(el.vizCanvas, { ride: true });
+  window.visualizer = visualizer; // exposed for debugging / dev capture
+  stopBackdrop(); // the overlay covers it — don't waste cycles
+  el.vizOverlay.hidden = false;
+  el.vizTitle.textContent = ''; // keep the visualizer immersive — no label overlay
+  // Go true fullscreen (button click is a valid user gesture for the API).
+  if (el.vizOverlay.requestFullscreen) el.vizOverlay.requestFullscreen().catch(() => {});
+  visualizer.start(await makeVizAnalyser());
+}
+
+function closeVisualizer() {
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+  if (visualizer) visualizer.stop();
+  if (vizCleanup) { vizCleanup(); vizCleanup = null; }
+  el.vizOverlay.hidden = true;
+  if (isPlaying) startBackdrop(); // backdrop only while playing
+}
+
+function toggleVisualizer() { if (el.vizOverlay.hidden) openVisualizer(); else closeVisualizer(); }
+
 // ---- Wire up UI ----
 el.btnPick.addEventListener('click', loadFile);
+el.btnViz.addEventListener('click', toggleVisualizer);
+el.vizClose.addEventListener('click', closeVisualizer);
+document.addEventListener('keydown', (e) => {
+  if (el.vizOverlay.hidden) return;
+  if (e.key === 'Escape') closeVisualizer();
+  else if (e.key === 'ArrowRight') { e.preventDefault(); visualizer && visualizer.nextScene(); }
+  else if (e.key === 'ArrowLeft') { e.preventDefault(); visualizer && visualizer.prevScene(); }
+});
 el.btnAutoSync.addEventListener('click', autoSync);
 el.btnAutoSyncUndo.addEventListener('click', undoAutoSync);
 el.btnPlay.addEventListener('click', togglePlay);
@@ -1705,6 +1824,31 @@ function handleAirPlayStatus({ key, status, desc }) {
 el.btnFindAirPlay.addEventListener('click', findAirPlay);
 if (window.api && window.api.onAirPlayStatus) window.api.onAirPlayStatus(handleAirPlayStatus);
 
+// ---- Fader fill: paint the amber portion of every range to its value --------
+function paintRange(r) {
+  const min = Number(r.min) || 0; const max = Number(r.max) || 100; const v = Number(r.value);
+  const pct = max > min ? ((v - min) / (max - min)) * 100 : 0;
+  r.style.setProperty('--fill', `${pct}%`);
+}
+function paintAllRanges() { document.querySelectorAll('input[type="range"]').forEach(paintRange); }
+document.addEventListener('input', (e) => { if (e.target && e.target.type === 'range') paintRange(e.target); }, true);
+// repaint after the device/sonos/airplay lists (re)render, which create new sliders
+new MutationObserver(paintAllRanges).observe(el.deviceList, { childList: true });
+new MutationObserver(paintAllRanges).observe(el.sonosList, { childList: true });
+new MutationObserver(paintAllRanges).observe(el.airplayList, { childList: true });
+
+// ---- Slate SMPTE timecode mirrors the transport time (no transport changes) -
+function toSmpte(t) {
+  const m = /(\d+):(\d+)/.exec(t || '');
+  if (!m) return '00:00:00:00';
+  return `00:${String(Number(m[1])).padStart(2, '0')}:${m[2].padStart(2, '0')}:00`;
+}
+if (el.slateTc) {
+  new MutationObserver(() => { el.slateTc.textContent = toSmpte(el.timeCurrent.textContent); })
+    .observe(el.timeCurrent, { childList: true, characterData: true, subtree: true });
+}
+
 scanDevices();
 findSonos();
 findAirPlay();
+paintAllRanges();
