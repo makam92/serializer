@@ -3,3 +3,8 @@ dist/
 out/
 *.log
 .DS_Store
+
+# Local dev tooling (installed skills / agents)
+.claude/
+.agents/
+skills-lock.json

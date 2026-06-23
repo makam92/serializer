@@ -13,11 +13,11 @@ let mainWindow = null;
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1040,
-    height: 720,
-    minWidth: 760,
-    minHeight: 520,
-    backgroundColor: '#0e0f13',
+    width: 1280,
+    height: 860,
+    minWidth: 920,
+    minHeight: 560,
+    backgroundColor: '#08090b',
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
