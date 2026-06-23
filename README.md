@@ -64,6 +64,9 @@ npm run dev
   audio to them, even across VLANs. Multiple rooms play grouped in tight sync, with
   per-room **volume** / **bass** and a group-wide **delay** — all over the network
   (see below)
+- **AirPlay (network)** — discovers AirPlay receivers (Apple TV, AirPlay-2 TVs,
+  HomePods) that the OS hides from the app's speaker list, and streams your Live audio
+  to them with per-device **volume** and a group-wide **delay** (see below)
 
 ### Broadcasting browser / system audio (Live mode)
 
@@ -94,6 +97,30 @@ in Live mode.
 > Sonos buffers on its own clock, so Sonos-vs-*local*-speaker timing is loose (~1–2 s);
 > Sonos-to-Sonos is tight. Streaming to Sonos is Live-mode only.
 
+> **Hearing reverb/echo on Sonos?** If your real speakers are part of the BlackHole
+> Multi-Output Device, you hear the *instant* local sound and the *delayed* Sonos sound
+> at once. Set the Mac's output to **BlackHole alone**, or move out of earshot of the
+> local speakers. The app shows this reminder whenever it streams to Sonos.
+
+### AirPlay over the network (Live mode)
+
+AirPlay receivers (Apple TV, AirPlay-2 TVs like Samsung's *The Frame*, HomePods) show
+up in macOS's volume menu but **not** in Chromium's device list — macOS only creates a
+Core Audio device for an AirPlay target once it's the system output. So Serializer
+discovers them itself over mDNS (`_airplay._tcp` / `_raop._tcp`) and streams to them
+directly. Tick devices under **AirPlay · network** while in Live mode.
+
+- Per-device **volume** uses AirPlay's own control (over the network).
+- A group-wide **delay** nudges the whole AirPlay set's timing (like Sonos).
+- Receivers that show a **PIN** on screen (e.g. Apple TV) prompt for it inline the first
+  time you connect.
+
+> Streaming to AirPlay uses the [`node-airtunes2`](https://www.npmjs.com/package/node-airtunes2)
+> library, which carries the AirPlay-2 pairing crypto. On macOS it runs in pure
+> JavaScript (no native build needed); on Windows/Linux `npm install` compiles a small
+> native module via `node-gyp`. Like Sonos, AirPlay is Live-mode only and buffers on its
+> own clock, so the same group-delay tuning applies.
+
 **Planned (later phases):**
 - Chromecast & other network-protocol speakers (mDNS discovery + casting)
 - Native macOS 14.4+ Core Audio process taps (system capture with no driver)
@@ -107,6 +134,7 @@ src/
   main.js              Electron main process (window, file dialog, permissions, Sonos IPC)
   preload.js           Secure bridge: file picker + file reading + Sonos control
   sonos.js             Sonos discovery (mDNS + UPnP topology) and control
+  airplay.js           AirPlay discovery (mDNS) + streaming via node-airtunes2
   streamserver.js      HTTP server that streams live PCM to Sonos players
   renderer/
     index.html         UI

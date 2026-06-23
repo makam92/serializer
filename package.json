@@ -18,5 +18,13 @@
   "license": "MIT",
   "devDependencies": {
     "electron": "^33.0.0"
+  },
+  "dependencies": {
+    "node-airtunes2": "^2.5.0"
+  },
+  "allowScripts": {
+    "electron@33.4.11": true,
+    "node-airtunes2@2.5.0": true,
+    "protobufjs@6.11.6": true
   }
 }

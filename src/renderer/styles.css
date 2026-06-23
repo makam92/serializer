@@ -249,3 +249,17 @@ input[type="range"]:disabled { opacity: 0.4; }
   font-size: 12px;
   font-variant-numeric: tabular-nums;
 }
+
+/* Caution banner (e.g. the Sonos monitoring-echo note) */
+.hint.warn {
+  color: var(--text);
+  background: rgba(224, 106, 106, 0.10);
+  border: 1px solid rgba(224, 106, 106, 0.35);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+.hint.warn strong { color: var(--danger); font-weight: 600; }
+
+/* Inline AirPlay pairing (PIN) form on a device row */
+.airplay-pin { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
+.airplay-pin input { width: 140px; }

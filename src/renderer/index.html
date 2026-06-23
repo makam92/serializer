@@ -103,8 +103,26 @@
           <button id="btnFindSonos" class="btn btn-ghost">↻ Find Sonos</button>
         </div>
         <p class="hint" id="sonosHint">Searching your network for Sonos rooms…</p>
+        <p class="hint warn" id="sonosWarn" hidden>
+          ⚠ Hearing an <strong>echo / reverb</strong> on Sonos? Sonos plays ~1–2&nbsp;s behind
+          your Mac. If your real speakers are part of your BlackHole <strong>Multi-Output
+          Device</strong>, you’re hearing both the instant local sound and the delayed Sonos
+          sound at once. To hear it cleanly on Sonos, set the Mac’s output to <strong>BlackHole
+          alone</strong> (not the Multi-Output), or move out of earshot of the local speakers.
+        </p>
         <div class="sonos-controls" id="sonosControls" hidden></div>
         <ul class="device-list" id="sonosList"></ul>
+      </section>
+
+      <!-- AirPlay (network) -->
+      <section class="panel devices">
+        <div class="devices-head">
+          <h2>AirPlay <span class="net-tag">network</span></h2>
+          <button id="btnFindAirPlay" class="btn btn-ghost">↻ Find AirPlay</button>
+        </div>
+        <p class="hint" id="airplayHint">Searching your network for AirPlay devices…</p>
+        <div class="sonos-controls" id="airplayControls" hidden></div>
+        <ul class="device-list" id="airplayList"></ul>
       </section>
     </main>
 

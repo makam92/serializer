@@ -44,7 +44,12 @@ const el = {
   btnFindSonos: document.getElementById('btnFindSonos'),
   sonosHint: document.getElementById('sonosHint'),
   sonosControls: document.getElementById('sonosControls'),
+  sonosWarn: document.getElementById('sonosWarn'),
   sonosList: document.getElementById('sonosList'),
+  btnFindAirPlay: document.getElementById('btnFindAirPlay'),
+  airplayHint: document.getElementById('airplayHint'),
+  airplayControls: document.getElementById('airplayControls'),
+  airplayList: document.getElementById('airplayList'),
 };
 
 // ---- State ----
@@ -277,8 +282,8 @@ let startingLive = false;
 async function startLive() {
   if (startingLive) return; // guard against a double Start before the build finishes
   const active = enabledChannels();
-  if (!active.length && !selectedSonosRooms().length) {
-    setStatus('Select at least one speaker or Sonos room first.');
+  if (!active.length && !selectedSonosRooms().length && !selectedAirPlay().length) {
+    setStatus('Select at least one speaker, Sonos room, or AirPlay device first.');
     return;
   }
   startingLive = true;
@@ -305,6 +310,7 @@ async function startLive() {
     const inputName = el.inputSelect.options[el.inputSelect.selectedIndex]?.textContent || 'input';
     setStatus(`Live: routing "${inputName}" to ${active.length} speaker${active.length > 1 ? 's' : ''}.`);
     if (selectedSonosRooms().length) refreshSonosStream();
+    if (selectedAirPlay().length) refreshAirPlayStream();
   } finally {
     startingLive = false;
   }
@@ -381,6 +387,7 @@ function teardownLiveNode(ch) {
 function stopLive() {
   stopMeter();
   stopSonosStream();
+  stopAirPlayStream();
   for (const ch of channels.values()) teardownLiveNode(ch);
   if (liveStream) { liveStream.getTracks().forEach((t) => t.stop()); liveStream = null; }
 }
@@ -476,6 +483,7 @@ function pause() {
     for (const ch of channels.values()) if (ch.live) ch.live.gain.gain.value = 0;
     stopMeter();
     stopSonosStream();
+    stopAirPlayStream();
     isPlaying = false;
     el.btnPlay.textContent = '▶ Start';
     setStatus('Live paused.');
@@ -1209,13 +1217,14 @@ async function refreshSonosStream() {
   const res = await window.api.sonosPlay(rooms.map(roomPayload));
   sonosActive = rooms;
   if (!res || !res.ok) setStatus(`Sonos error: ${(res && res.error) || 'failed'}`);
-  else setStatus(`Streaming to Sonos: ${rooms.map((r) => r.roomName).join(', ')}.`);
+  else { setStatus(`Streaming to Sonos: ${rooms.map((r) => r.roomName).join(', ')}.`); el.sonosWarn.hidden = false; }
 }
 
 async function stopSonosStream() {
   teardownSonosCapture();
   if (sonosActive.length) await window.api.sonosStop(sonosActive.map(roomPayload));
   sonosActive = [];
+  el.sonosWarn.hidden = true;
 }
 
 async function findSonos() {
@@ -1357,5 +1366,345 @@ async function onToggleSonos(room, cb, li) {
 
 el.btnFindSonos.addEventListener('click', findSonos);
 
+// ---- AirPlay (network) discovery + streaming ----
+// AirPlay receivers (Apple TV, AirPlay-2 TVs, HomePods) never show up in the OS
+// audiooutput list until they're the system output, so we discover and stream to
+// them ourselves — mirroring the Sonos path. Streaming reuses the same live
+// capture format (16-bit/44.1 kHz/stereo), fed over its own IPC channel.
+/** @type {Array<{id:string, name:string, host:string, port:number, txt:string[], airplay2:boolean, model:string, volume?:number}>} */
+let airplayDevices = [];
+/** @type {Set<string>} enabled device ids */
+const airplayEnabled = new Set();
+/** @type {?{ctx: AudioContext, src: MediaStreamAudioSourceNode, delay: DelayNode, node: AudioNode, zero: GainNode}} */
+let airplayCapture = null;
+/** @type {?Promise<any>} guards concurrent (async) capture builds */
+let airplayCaptureBuilding = null;
+/** @type {Array<object>} devices currently told to play */
+let airplayActive = [];
+
+// Group-wide delay applied to the AirPlay feed (receivers can only be pushed
+// later, like Sonos). Persisted across sessions.
+const AIRPLAY_MAX_DELAY = 3000;
+const AIRPLAY_DELAY_KEY = 'serializer.airplayDelay.v1';
+let airplayDelayMs = (() => {
+  const v = parseInt(localStorage.getItem(AIRPLAY_DELAY_KEY) || '0', 10);
+  return isNaN(v) ? 0 : Math.max(0, Math.min(AIRPLAY_MAX_DELAY, v));
+})();
+const persistAirplayDelay = debounce(() => {
+  try { localStorage.setItem(AIRPLAY_DELAY_KEY, String(airplayDelayMs)); } catch {}
+}, 400);
+function setAirplayDelay(ms) {
+  airplayDelayMs = Math.max(0, Math.min(AIRPLAY_MAX_DELAY, Math.round(ms)));
+  if (airplayCapture && airplayCapture.delay) {
+    const t = airplayCapture.ctx.currentTime;
+    airplayCapture.delay.delayTime.setTargetAtTime(airplayDelayMs / 1000, t, 0.03);
+  }
+  persistAirplayDelay();
+}
+
+function airplayKey(d) { return `${d.host}:${d.port}`; }
+function airplayPayload(d) {
+  return { id: d.id, name: d.name, host: d.host, port: d.port, txt: d.txt, airplay2: d.airplay2, volume: d.volume ?? 50 };
+}
+// Insertion order (NOT alphabetical) keeps selection stable.
+function selectedAirPlay() {
+  return [...airplayEnabled].map((id) => airplayDevices.find((d) => d.id === id)).filter(Boolean);
+}
+
+/**
+ * Tap the live stream, convert to 16-bit stereo PCM at 44.1 kHz, and ship each
+ * block to the main process for the AirPlay sender. Reuses the same audio-thread
+ * worklet as the Sonos path; runs through a zero-gain node so it makes no sound.
+ */
+async function buildAirPlayCapture() {
+  if (airplayCapture) return airplayCapture;
+  if (airplayCaptureBuilding) return airplayCaptureBuilding;
+  if (!liveStream) return null;
+  airplayCaptureBuilding = (async () => {
+    let ctx;
+    try {
+      ctx = new AudioContext({ sampleRate: 44100 });
+      const src = ctx.createMediaStreamSource(liveStream);
+      const delay = ctx.createDelay(AIRPLAY_MAX_DELAY / 1000);
+      delay.delayTime.value = airplayDelayMs / 1000;
+      const zero = ctx.createGain();
+      zero.gain.value = 0;
+
+      let node;
+      try {
+        await ctx.audioWorklet.addModule('sonos-capture-worklet.js');
+        node = new AudioWorkletNode(ctx, 'sonos-capture', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] });
+        node.port.onmessage = (e) => window.api.sendAirPlayPcm(e.data);
+      } catch (err) {
+        node = ctx.createScriptProcessor(4096, 2, 1);
+        node.onaudioprocess = (e) => {
+          const inp = e.inputBuffer;
+          const L = inp.getChannelData(0);
+          const R = inp.numberOfChannels > 1 ? inp.getChannelData(1) : L;
+          const pcm = new Int16Array(L.length * 2);
+          for (let i = 0; i < L.length; i++) {
+            const l = Math.max(-1, Math.min(1, L[i]));
+            const r = Math.max(-1, Math.min(1, R[i]));
+            pcm[i * 2] = l < 0 ? l * 0x8000 : l * 0x7fff;
+            pcm[i * 2 + 1] = r < 0 ? r * 0x8000 : r * 0x7fff;
+          }
+          window.api.sendAirPlayPcm(pcm.buffer);
+        };
+        console.warn('AirPlay capture worklet unavailable, using ScriptProcessor:', err.message);
+      }
+
+      src.connect(delay);
+      delay.connect(node);
+      node.connect(zero);
+      zero.connect(ctx.destination);
+      await ctx.resume();
+      airplayCapture = { ctx, src, delay, node, zero };
+      return airplayCapture;
+    } catch (err) {
+      if (ctx) ctx.close().catch(() => {});
+      setStatus(`AirPlay audio capture failed: ${err.message}`);
+      return null;
+    } finally {
+      airplayCaptureBuilding = null;
+    }
+  })();
+  return airplayCaptureBuilding;
+}
+
+function teardownAirPlayCapture() {
+  if (!airplayCapture) return;
+  try {
+    if (airplayCapture.node.port) airplayCapture.node.port.onmessage = null;
+    if ('onaudioprocess' in airplayCapture.node) airplayCapture.node.onaudioprocess = null;
+    airplayCapture.src.disconnect();
+    airplayCapture.delay.disconnect();
+    airplayCapture.node.disconnect();
+    airplayCapture.zero.disconnect();
+  } catch {}
+  airplayCapture.ctx.close().catch(() => {});
+  airplayCapture = null;
+  airplayCaptureBuilding = null;
+}
+
+/** Re-sync the AirPlay set to the current selection (capture keeps running). */
+async function refreshAirPlayStream() {
+  if (mode !== 'live' || !isPlaying || !liveStream) return;
+  const devices = selectedAirPlay();
+  if (!devices.length) { await stopAirPlayStream(); return; }
+  await buildAirPlayCapture();
+  const keep = new Set(devices.map(airplayKey));
+  const removed = airplayActive.filter((d) => !keep.has(airplayKey(d))).map(airplayKey);
+  if (removed.length) await window.api.airplayStop(removed);
+  const res = await window.api.airplayPlay(devices.map(airplayPayload));
+  airplayActive = devices;
+  if (!res || !res.ok) setStatus(`AirPlay error: ${(res && res.error) || 'failed'}`);
+  else setStatus(`Streaming to AirPlay: ${devices.map((d) => d.name).join(', ')}.`);
+}
+
+async function stopAirPlayStream() {
+  teardownAirPlayCapture();
+  if (airplayActive.length) await window.api.airplayStop(airplayActive.map(airplayKey));
+  airplayActive = [];
+}
+
+async function findAirPlay() {
+  if (!window.api || !window.api.discoverAirPlay) return;
+  el.btnFindAirPlay.disabled = true;
+  el.airplayHint.textContent = 'Searching your network for AirPlay devices…';
+  try {
+    airplayDevices = await window.api.discoverAirPlay();
+  } catch (err) {
+    airplayDevices = [];
+    el.airplayHint.textContent = `AirPlay search failed: ${err.message}`;
+    el.btnFindAirPlay.disabled = false;
+    return;
+  }
+  renderAirPlay();
+  el.btnFindAirPlay.disabled = false;
+}
+
+function renderAirPlay() {
+  el.airplayList.innerHTML = '';
+  if (!airplayDevices.length) {
+    el.airplayHint.textContent = 'No AirPlay devices found. Make sure they’re powered on and on the same network, then press Find AirPlay.';
+    el.airplayControls.hidden = true;
+    return;
+  }
+  el.airplayHint.textContent = `${airplayDevices.length} AirPlay device${airplayDevices.length > 1 ? 's' : ''} found. Tick devices and use 🎙 Live input to broadcast to them.`;
+  mountAirPlayControls();
+  for (const dev of airplayDevices) el.airplayList.appendChild(renderAirPlayRow(dev));
+}
+
+/** One-time mount of the group-wide delay control above the device list. */
+function mountAirPlayControls() {
+  if (el.airplayControls.childElementCount) { el.airplayControls.hidden = false; return; }
+  const label = document.createElement('span');
+  label.className = 'sonos-controls-label';
+  label.textContent = 'Group delay';
+  el.airplayControls.appendChild(label);
+  el.airplayControls.appendChild(airplayDelayControl());
+  el.airplayControls.hidden = false;
+}
+
+/** Delay + nudge for the whole AirPlay set (0..AIRPLAY_MAX_DELAY ms, add-only). */
+function airplayDelayControl() {
+  const g = document.createElement('div');
+  g.className = 'slider-group delay-group';
+
+  const slider = document.createElement('input');
+  slider.type = 'range';
+  slider.min = '0'; slider.max = String(AIRPLAY_MAX_DELAY); slider.step = '10';
+  slider.value = String(airplayDelayMs);
+
+  const num = document.createElement('input');
+  num.type = 'number';
+  num.className = 'delay-num';
+  num.min = '0'; num.max = String(AIRPLAY_MAX_DELAY); num.step = '10';
+  num.value = String(airplayDelayMs);
+
+  const unit = document.createElement('span');
+  unit.className = 'val';
+  unit.textContent = 'ms';
+
+  const apply = (v) => {
+    setAirplayDelay(v);
+    slider.value = String(airplayDelayMs);
+    num.value = String(airplayDelayMs);
+  };
+  const nudge = (text, step) => {
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'nudge'; b.textContent = text;
+    b.addEventListener('click', () => apply(airplayDelayMs + step));
+    return b;
+  };
+  slider.addEventListener('input', () => apply(Number(slider.value)));
+  num.addEventListener('input', () => apply(Number(num.value)));
+
+  g.appendChild(nudge('−100', -100));
+  g.appendChild(nudge('−10', -10));
+  g.appendChild(num);
+  g.appendChild(unit);
+  g.appendChild(nudge('+10', 10));
+  g.appendChild(nudge('+100', 100));
+  g.appendChild(slider);
+  return g;
+}
+
+function renderAirPlayRow(dev) {
+  const li = document.createElement('li');
+  li.className = 'device sonos-device' + (airplayEnabled.has(dev.id) ? ' active' : '');
+  li.dataset.key = dev.id;
+
+  const enableWrap = document.createElement('div');
+  enableWrap.className = 'dev-enable';
+  const cb = document.createElement('input');
+  cb.type = 'checkbox';
+  cb.checked = airplayEnabled.has(dev.id);
+  cb.addEventListener('change', () => onToggleAirPlay(dev, cb, li));
+  enableWrap.appendChild(cb);
+
+  const main = document.createElement('div');
+  main.className = 'dev-main';
+  const name = document.createElement('div');
+  name.className = 'dev-name';
+  name.textContent = dev.name;
+  const badge = document.createElement('span');
+  badge.className = 'badge';
+  badge.textContent = dev.airplay2 ? 'AirPlay 2' : 'AirPlay';
+  name.appendChild(badge);
+  main.appendChild(name);
+
+  const sub = document.createElement('div');
+  sub.className = 'dev-sub';
+  sub.textContent = `${dev.host} · ${dev.model}`;
+  main.appendChild(sub);
+
+  // AirPlay receivers don't pass through our Web Audio gain, so volume is sent to
+  // the device over the protocol.
+  const sliders = document.createElement('div');
+  sliders.className = 'dev-sliders';
+  const pushVol = throttle((v) => window.api.airplaySetVolume(dev.id, v), 120);
+  sliders.appendChild(sliderGroup('Volume', 0, 100, dev.volume ?? 50, '%', (v) => { dev.volume = v; pushVol(v); }));
+  main.appendChild(sliders);
+
+  li.appendChild(enableWrap);
+  li.appendChild(main);
+  return li;
+}
+
+async function onToggleAirPlay(dev, cb, li) {
+  if (cb.checked) airplayEnabled.add(dev.id);
+  else airplayEnabled.delete(dev.id);
+  li.classList.toggle('active', cb.checked);
+
+  if (mode === 'live' && isPlaying) {
+    await refreshAirPlayStream();
+  } else if (cb.checked) {
+    setStatus('Switch to 🎙 Live input and press Start to broadcast to AirPlay.');
+  }
+}
+
+// ---- AirPlay pairing (PIN) ----
+// Some receivers (Apple TV, HomePod) show a code on screen the first time. The
+// sender emits 'need_password'; we collect the code inline and send it back.
+function promptAirPlayPasscode(key, name) {
+  const li = el.airplayList.querySelector(`li[data-key="${CSS.escape(key)}"]`);
+  if (!li || li.querySelector('.airplay-pin')) return;
+  const form = document.createElement('form');
+  form.className = 'airplay-pin';
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.inputMode = 'numeric';
+  input.placeholder = `Code on “${name}”`;
+  input.className = 'delay-num';
+  const submit = document.createElement('button');
+  submit.type = 'submit'; submit.className = 'btn btn-ghost'; submit.textContent = 'Pair';
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const code = input.value.trim();
+    if (code) { window.api.airplaySendPasscode(key, code); setStatus(`Pairing with “${name}”…`); }
+  });
+  form.appendChild(input);
+  form.appendChild(submit);
+  li.querySelector('.dev-main').appendChild(form);
+  input.focus();
+}
+
+function clearAirPlayPasscode(key) {
+  const li = el.airplayList.querySelector(`li[data-key="${CSS.escape(key)}"]`);
+  const form = li && li.querySelector('.airplay-pin');
+  if (form) form.remove();
+}
+
+function handleAirPlayStatus({ key, status, desc }) {
+  const dev = airplayDevices.find((d) => d.id === key);
+  const name = dev ? dev.name : key;
+  switch (status) {
+    case 'need_password':
+      promptAirPlayPasscode(key, name);
+      setStatus(`AirPlay: enter the code shown on “${name}”.`);
+      break;
+    case 'pair_failed':
+      setStatus(`AirPlay pairing failed for “${name}”. Re-tick it to try again.`);
+      break;
+    case 'pair_success':
+    case 'ready':
+      clearAirPlayPasscode(key);
+      break;
+    case 'playing':
+      setStatus(`AirPlay: streaming to “${name}”.`);
+      break;
+    case 'error':
+      setStatus(`AirPlay error on “${name}”: ${desc || 'unknown'}.`);
+      break;
+    default:
+      break;
+  }
+}
+
+el.btnFindAirPlay.addEventListener('click', findAirPlay);
+if (window.api && window.api.onAirPlayStatus) window.api.onAirPlayStatus(handleAirPlayStatus);
+
 scanDevices();
 findSonos();
+findAirPlay();

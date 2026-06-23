@@ -3,6 +3,7 @@
 const { app, BrowserWindow, ipcMain, dialog, session } = require('electron');
 const path = require('node:path');
 const sonos = require('./sonos');
+const airplay = require('./airplay');
 const { StreamServer } = require('./streamserver');
 
 /** @type {StreamServer | null} */
@@ -10,6 +11,16 @@ let streamServer = null;
 
 /** @type {BrowserWindow | null} */
 let mainWindow = null;
+
+// Streams the live capture to AirPlay receivers (Apple TV, AirPlay-2 TVs,
+// HomePods). Discovery is dependency-free; the streaming half lazily loads
+// node-airtunes2 and degrades gracefully if it can't load or pair.
+const airplayCaster = new airplay.AirPlayCaster();
+airplayCaster.onStatus = (key, status, desc) => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('airplay:status', { key, status, desc });
+  }
+};
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -136,6 +147,32 @@ ipcMain.handle('sonos:bass', async (_e, { ip, bass }) => {
   try { await sonos.setBass(ip, bass); return { ok: true }; }
   catch (e) { return { ok: false, error: e.message }; }
 });
+
+// ---- AirPlay (network) ----
+// Discover AirPlay receivers on the LAN (renderer asks via this channel).
+ipcMain.handle('airplay:discover', async () => {
+  const devices = await airplay.discover();
+  console.log(`[airplay] discovered ${devices.length} device(s):`, devices.map((d) => `${d.name} (${d.model})`).join(', '));
+  return devices;
+});
+
+// (Re)connect the given receivers and stream the live feed to them.
+ipcMain.handle('airplay:play', (_e, receivers) => airplayCaster.play(receivers || []));
+
+// Stop a subset of receivers (by `host:port` key), or all when none given.
+ipcMain.handle('airplay:stop', (_e, keys) => {
+  if (keys && keys.length) airplayCaster.stop(keys); else airplayCaster.stopAll();
+  return { ok: true };
+});
+
+ipcMain.handle('airplay:volume', (_e, { key, volume }) => { airplayCaster.setVolume(key, volume); return { ok: true }; });
+
+// Enter the PIN a receiver (e.g. an Apple TV) displays on screen when pairing.
+ipcMain.handle('airplay:passcode', (_e, { key, passcode }) => { airplayCaster.setPasscode(key, passcode); return { ok: true }; });
+
+// Live PCM frames from the renderer's capture → AirPlay receivers. Separate from
+// the Sonos feed so either can run alone.
+ipcMain.on('airplay:pcm', (_e, buf) => airplayCaster.writePcm(Buffer.from(buf)));
 
 app.whenReady().then(async () => {
   configureMediaPermissions();

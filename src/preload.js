@@ -41,4 +41,36 @@ contextBridge.exposeInMainWorld('api', {
 
   /** Set a Sonos room's bass (-10…+10). */
   sonosSetBass: (ip, bass) => ipcRenderer.invoke('sonos:bass', { ip, bass }),
+
+  /**
+   * Discover AirPlay receivers (Apple TV, AirPlay-2 TVs, HomePods) on the LAN.
+   * @returns {Promise<Array<{id:string, name:string, host:string, port:number, txt:string[], airplay2:boolean, model:string}>>}
+   */
+  discoverAirPlay: () => ipcRenderer.invoke('airplay:discover'),
+
+  /** Start streaming our live feed to the given AirPlay receivers. */
+  airplayPlay: (receivers) => ipcRenderer.invoke('airplay:play', receivers),
+
+  /** Stop the given AirPlay receivers (by `host:port` key); stops all if empty. */
+  airplayStop: (keys) => ipcRenderer.invoke('airplay:stop', keys),
+
+  /** Push a chunk of 16-bit stereo PCM to the AirPlay stream. */
+  sendAirPlayPcm: (arrayBuffer) => ipcRenderer.send('airplay:pcm', arrayBuffer),
+
+  /** Set an AirPlay receiver's volume (0–100), keyed by `host:port`. */
+  airplaySetVolume: (key, volume) => ipcRenderer.invoke('airplay:volume', { key, volume }),
+
+  /** Send the on-screen PIN for a receiver that requires pairing. */
+  airplaySendPasscode: (key, passcode) => ipcRenderer.invoke('airplay:passcode', { key, passcode }),
+
+  /**
+   * Listen for AirPlay device status updates (ready / playing / stopped /
+   * need_password / pair_failed / pair_success / error).
+   * @param {(payload:{key:string, status:string, desc:string}) => void} cb
+   */
+  onAirPlayStatus: (cb) => {
+    const handler = (_e, payload) => cb(payload);
+    ipcRenderer.on('airplay:status', handler);
+    return () => ipcRenderer.removeListener('airplay:status', handler);
+  },
 });
