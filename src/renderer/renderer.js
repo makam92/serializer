@@ -23,42 +23,63 @@ import { COLS, moveElement, resizeElement, addElement, removeElement, bottom } f
 // ---- DOM ----
 const el = {
   trackTitle: document.getElementById('trackTitle'),
-  trackSub: document.getElementById('trackSub'),
+  trackSub: document.getElementById('trackSubtitle'),
+  trackFormat: document.getElementById('trackFormat'),
   timeCurrent: document.getElementById('timeCurrent'),
   timeTotal: document.getElementById('timeTotal'),
   seek: document.getElementById('seek'),
-  btnPick: document.getElementById('btnPick'),
+  btnPick: document.getElementById('btnOpen'),
+  fileTransport: document.getElementById('fileTransport'),
+  liveTransport: document.getElementById('liveTransport'),
+  tpButtons: document.getElementById('tpButtons'),
+  tpsTitle: document.getElementById('tpsTitle'),
+  tpsSub: document.getElementById('tpsSub'),
+  masterDb: document.getElementById('masterDb'),
+  vuL: document.getElementById('vuL'),
+  vuR: document.getElementById('vuR'),
   btnPlay: document.getElementById('btnPlay'),
   btnStop: document.getElementById('btnStop'),
   masterVol: document.getElementById('masterVol'),
   btnRescan: document.getElementById('btnRescan'),
   btnAutoSync: document.getElementById('btnAutoSync'),
   btnAutoSyncUndo: document.getElementById('btnAutoSyncUndo'),
-  btnViz: document.getElementById('btnViz'),
+  btnViz: document.getElementById('btnVisualize'),
+  timecode: document.getElementById('timecode'),
+  timecodeTotal: document.getElementById('timecodeTotal'),
+  statusPill: document.getElementById('statusPill'),
+  statusDot: document.getElementById('statusDot'),
+  wallclock: document.querySelector('[data-wallclock]'),
+  tally: document.getElementById('tally'),
   bgCanvas: document.getElementById('bgCanvas'),
   vizOverlay: document.getElementById('vizOverlay'),
   vizCanvas: document.getElementById('vizCanvas'),
   vizClose: document.getElementById('vizClose'),
   vizTitle: document.getElementById('vizTitle'),
   devicesHint: document.getElementById('devicesHint'),
+  devicesMeta: document.getElementById('devicesMeta'),
+  devicesDiscover: document.getElementById('devicesDiscover'),
   deviceList: document.getElementById('deviceList'),
-  status: document.getElementById('status'),
+  status: document.getElementById('statusText'),
+  statusSys: document.getElementById('statusSys'),
   transportStatus: document.getElementById('transportStatus'),
-  slateTc: document.getElementById('slateTc'),
-  btnModeFile: document.getElementById('btnModeFile'),
-  btnModeLive: document.getElementById('btnModeLive'),
-  inputSelect: document.getElementById('inputSelect'),
+  btnModeFile: document.getElementById('segFile'),
+  btnModeLive: document.getElementById('segLive'),
+  inputSelect: document.getElementById('inputDevice'),
   liveHint: document.getElementById('liveHint'),
   inputMeter: document.getElementById('inputMeter'),
   meterFill: document.getElementById('meterFill'),
   meterDb: document.getElementById('meterDb'),
   btnFindSonos: document.getElementById('btnFindSonos'),
   sonosHint: document.getElementById('sonosHint'),
+  sonosDiscover: document.getElementById('sonosDiscover'),
   sonosControls: document.getElementById('sonosControls'),
   sonosWarn: document.getElementById('sonosWarn'),
+  btnMuteLocal: document.getElementById('btnMuteLocal'),
+  btnEchoDismiss: document.getElementById('btnEchoDismiss'),
   sonosList: document.getElementById('sonosList'),
   btnFindAirPlay: document.getElementById('btnFindAirPlay'),
   airplayHint: document.getElementById('airplayHint'),
+  airplayDiscover: document.getElementById('airplayDiscover'),
   airplayControls: document.getElementById('airplayControls'),
   airplayList: document.getElementById('airplayList'),
 };
@@ -83,12 +104,14 @@ let playMode = 'file'; // the mode whose playback is actually running (decoupled
 let currentObjectUrl = null;
 let trackName = '';
 let masterVolume = 1;
+let localMuted = false; // "Mute local output" (echo banner) — silences local speakers, keeps Sonos/AirPlay
 let isPlaying = false;
 let durationSec = 0;
 let seeking = false;
 
 // live state
 let inputDeviceId = '';
+let blackholeInstalled = false; // true once the BlackHole virtual driver is detected as an input
 let liveStream = null;
 // While paused in Live mode we keep the Sonos/AirPlay captures alive but feed
 // them silence, so the receivers stay grouped + buffered and resume in sync
@@ -103,8 +126,8 @@ let meterRaf = 0;
 let meterPeakHold = 0; // smoothed peak, 0..1
 
 const DRIFT_THRESHOLD = 0.04; // seconds — re-align a file speaker once it drifts past this
-const MAX_DELAY = 3.0;        // DelayNode max (seconds) — big enough for AirPlay/Sonos buffering
-const DELAY_COMP_RANGE = 3000; // delay-comp slider span (± ms)
+const MAX_DELAY = 8.0;        // DelayNode max (seconds) — AirPlay TVs can buffer several seconds
+const DELAY_COMP_RANGE = 8000; // delay-comp slider span (± ms)
 const BASS_FREQ = 200;        // low-shelf corner (Hz) — boosts everything below this
 const BASS_MAX_DB = 12;       // max bass boost (dB)
 
@@ -146,6 +169,24 @@ function fmtTime(sec) {
   return `${m}:${String(s).padStart(2, '0')}`;
 }
 function setStatus(msg) { el.status.textContent = msg; }
+
+/**
+ * Show a header "discovering…" spinner for at least `minMs` so the animation is
+ * visible even when a scan returns near-instantly (e.g. local device enumeration).
+ * Returns a `done()` to call when the scan finishes.
+ */
+function flashDiscovering(elDiscover, minMs = 650) {
+  if (!elDiscover) return () => {};
+  elDiscover.hidden = false;
+  const start = Date.now();
+  // safety: never let the spinner get stuck if a scan throws before done()
+  const safety = setTimeout(() => { elDiscover.hidden = true; }, 20000);
+  return () => {
+    clearTimeout(safety);
+    const wait = Math.max(0, minMs - (Date.now() - start));
+    setTimeout(() => { elDiscover.hidden = true; }, wait);
+  };
+}
 
 /** Rate-limit a function to at most once per `ms`, with a trailing call. */
 function throttle(fn, ms) {
@@ -191,6 +232,7 @@ async function unlockDeviceLabels() {
 
 async function scanDevices() {
   setStatus('Scanning audio devices…');
+  const doneDiscover = flashDiscovering(el.devicesDiscover);
   await unlockDeviceLabels();
 
   const devices = await navigator.mediaDevices.enumerateDevices();
@@ -208,16 +250,13 @@ async function scanDevices() {
     }
   }
   for (const [id, ch] of channels) {
-    if (seen.has(id)) continue;
-    if (ch.enabled) {
-      // A selected speaker vanished — stop using its dead sink and deselect it.
-      // (Its saved prefs survive, so it re-selects itself if it comes back.)
-      teardownLiveNode(ch);
-      try { ch.audio.pause(); } catch {}
-      ch.enabled = false;
-      setStatus(`"${ch.info.label}" disconnected.`);
-    }
-    channels.delete(id);
+    // Only prune vanished devices that aren't in use. NEVER pause/deselect an
+    // ENABLED speaker on a transient enumeration change — starting playback wakes
+    // the device and fires a `devicechange`, during which the device can briefly
+    // drop out of enumerateDevices(); pausing it there was killing audio the
+    // instant you pressed Play. A genuinely unplugged speaker just goes silent
+    // until you untick it, which is harmless.
+    if (!seen.has(id) && !ch.enabled) channels.delete(id);
   }
 
   renderDevices();
@@ -226,6 +265,7 @@ async function scanDevices() {
   el.devicesHint.textContent = outputs.length
     ? `${outputs.length} output${outputs.length > 1 ? 's' : ''} found. Tick the speakers you want, then press ${mode === 'live' ? 'Start' : 'Play'}.`
     : 'No audio outputs found. Connect a speaker and press Rescan.';
+  doneDiscover();
   setStatus('Ready.');
 }
 
@@ -256,6 +296,8 @@ function populateInputs(inputs) {
   }
   // Prefer BlackHole if present, else keep previous, else first.
   const blackhole = inputs.find((d) => /blackhole/i.test(d.label));
+  blackholeInstalled = !!blackhole; // the BlackHole hint shows only when it's missing
+  if (el.liveHint && mode === 'live' && !isPlaying) el.liveHint.hidden = blackholeInstalled;
   el.inputSelect.value = blackhole ? blackhole.deviceId : (prev || (inputs[0] && inputs[0].deviceId) || '');
   inputDeviceId = el.inputSelect.value;
 }
@@ -362,13 +404,14 @@ async function startLive() {
 
     isPlaying = true;
     playMode = 'live';
-    el.btnPlay.textContent = '⏸ Pause';
+    setPlayState(true);
     const inputName = el.inputSelect.options[el.inputSelect.selectedIndex]?.textContent || 'input';
     setStatus(`Live: routing "${inputName}" to ${active.length} speaker${active.length > 1 ? 's' : ''}.`);
     if (selectedSonosRooms().length) refreshSonosStream();
     if (selectedAirPlay().length) refreshAirPlayStream();
     setNetworkCapturePaused(false); // unmute the captures on (re)start / resume
     startBackdrop();
+    setLiveUI(true);
   } finally {
     startingLive = false;
   }
@@ -506,9 +549,9 @@ function meterTick() {
   // Map RMS to a 0..1 bar over a useful -60..0 dB range.
   const db = rms > 0 ? 20 * Math.log10(rms) : -Infinity;
   const frac = !isFinite(db) ? 0 : Math.max(0, Math.min(1, (db + 60) / 60));
-  el.meterFill.style.transform = `scaleX(${frac})`;
+  el.meterFill.style.width = `${(frac * 100).toFixed(1)}%`;
   el.meterFill.classList.toggle('clip', meterPeakHold >= 0.99);
-  el.meterDb.textContent = isFinite(db) ? `${db.toFixed(0)} dB` : '–∞ dB';
+  el.meterDb.textContent = isFinite(db) ? db.toFixed(1) : '–∞';
 
   meterRaf = requestAnimationFrame(meterTick);
 }
@@ -518,10 +561,10 @@ function stopMeter() {
   if (meterCtx) { meterCtx.close().catch(() => {}); meterCtx = null; }
   meterAnalyser = null;
   meterData = null;
-  el.inputMeter.hidden = true;
-  el.meterFill.style.transform = 'scaleX(0)';
+  // Keep the INPUT LEVEL bar visible (empty) in live mode — just reset the fill.
+  el.meterFill.style.width = '0%';
   el.meterFill.classList.remove('clip');
-  el.meterDb.textContent = '–∞ dB';
+  el.meterDb.textContent = '–∞';
 }
 
 // ---- Transport (mode-aware) ----
@@ -548,7 +591,7 @@ async function play() {
 
   isPlaying = true;
   playMode = 'file';
-  el.btnPlay.textContent = '⏸ Pause';
+  setPlayState(true);
   setStatus(`Playing on ${active.length} speaker${active.length > 1 ? 's' : ''}.`);
   startBackdrop();
 }
@@ -563,22 +606,23 @@ function pause() {
     stopMeter();
     setNetworkCapturePaused(true); // mute Sonos/AirPlay but keep them primed
     isPlaying = false;
-    el.btnPlay.textContent = '▶ Start';
+    setPlayState(false);
+    setLiveUI(false);
     setStatus('Live paused.');
     return;
   }
   for (const ch of channels.values()) ch.audio.pause();
   isPlaying = false;
-  el.btnPlay.textContent = '▶ Play';
+  setPlayState(false);
   setStatus('Paused.');
 }
 
 function stop() {
   stopBackdrop();
-  if (playMode === 'live') { stopLive(); isPlaying = false; el.btnPlay.textContent = '▶ Start'; setStatus('Live stopped.'); return; }
+  if (playMode === 'live') { stopLive(); isPlaying = false; setPlayState(false); setLiveUI(false); setStatus('Live stopped.'); return; }
   for (const ch of channels.values()) { ch.audio.pause(); ch.audio.currentTime = 0; }
   isPlaying = false;
-  el.btnPlay.textContent = '▶ Play';
+  setPlayState(false);
   el.seek.value = '0';
   el.timeCurrent.textContent = '0:00';
   setStatus('Stopped.');
@@ -617,7 +661,7 @@ function syncTick() {
 setInterval(syncTick, 250);
 
 // ---- Volume / bass application ----
-function effectiveVol(ch) { return Math.min(1, ch.volume * masterVolume); }
+function effectiveVol(ch) { return localMuted ? 0 : Math.min(1, ch.volume * masterVolume); }
 
 /** Route a channel's level to whichever node owns its output (graph gain or element). */
 function applyChannelVolume(ch) {
@@ -698,12 +742,14 @@ function setMode(next) {
   const live = mode === 'live';
   el.btnModeFile.classList.toggle('active', !live);
   el.btnModeLive.classList.toggle('active', live);
-  el.inputSelect.hidden = !live;
-  el.liveHint.hidden = !live;
-  el.btnPick.hidden = live;
+  if (el.fileTransport) el.fileTransport.hidden = live;
+  if (el.liveTransport) el.liveTransport.hidden = !live;
+  el.btnPick.hidden = live; // "Open file" is file-mode only; Play/Stop are shared
+  if (el.tpButtons) el.tpButtons.classList.toggle('live', live);
 
   // If something is playing, leave the transport/display alone — just changed tabs.
   if (isPlaying) return;
+  if (live) setLiveUI(false);
 
   playMode = next; // idle: the next Play uses the viewed mode
   el.seek.disabled = live;
@@ -713,16 +759,33 @@ function setMode(next) {
     el.timeCurrent.textContent = '–:––';
     el.timeTotal.textContent = '–:––';
     el.seek.value = '0';
-    el.btnPlay.textContent = '▶ Start';
+    setPlayState(false);
     el.btnPlay.disabled = false;
     el.btnStop.disabled = false;
   } else {
     el.trackTitle.textContent = trackName || 'No track loaded';
     el.trackSub.textContent = trackName ? 'Ready' : 'Choose an audio file to begin';
     el.timeTotal.textContent = fmtTime(durationSec);
-    el.btnPlay.textContent = '▶ Play';
+    setPlayState(false);
     el.btnPlay.disabled = !currentObjectUrl;
     el.btnStop.disabled = !currentObjectUrl;
+  }
+}
+
+/** The play button is a CSS orb — toggle its glyph via a class instead of text. */
+function setPlayState(playing) {
+  if (el.btnPlay) el.btnPlay.classList.toggle('playing', playing);
+}
+
+/** Live transport view: idle (hint + "press Start") vs streaming (level + status). */
+function setLiveUI(streaming) {
+  if (el.tpButtons) el.tpButtons.classList.toggle('streaming', streaming);
+  // Hint only when idle AND BlackHole isn't installed (nothing to explain otherwise).
+  if (el.liveHint) el.liveHint.hidden = streaming || blackholeInstalled;
+  if (el.tpsTitle) el.tpsTitle.textContent = streaming ? 'Streaming live input' : 'Live input';
+  if (el.tpsSub) {
+    const n = enabledChannels().length + selectedSonosRooms().length + selectedAirPlay().length;
+    el.tpsSub.textContent = streaming ? `→ ${n} output${n !== 1 ? 's' : ''} · 48 kHz` : 'press Start to broadcast';
   }
 }
 
@@ -730,54 +793,77 @@ function setMode(next) {
 function renderDevices() {
   el.deviceList.innerHTML = '';
   for (const ch of channels.values()) el.deviceList.appendChild(renderDeviceRow(ch));
+  updateDevicesMeta();
+}
+
+/** Output Bus header readout: "local · N of M" (N ticked of M discovered). */
+function updateDevicesMeta() {
+  if (!el.devicesMeta) return;
+  const total = channels.size;
+  const on = enabledChannels().length;
+  el.devicesMeta.textContent = total ? `local · ${on} of ${total}` : '';
 }
 
 /** @param {Channel} ch */
+// ---- Console row primitives ----
+function rowBadge(text, kind) {
+  const b = document.createElement('span');
+  b.className = 'rbadge' + (kind ? ` rbadge-${kind}` : '');
+  b.textContent = text;
+  return b;
+}
+function fmtDb(v) { const d = v > 0 ? 20 * Math.log10(v) : -Infinity; return isFinite(d) && d > -60 ? `${d.toFixed(1)} dB` : (v > 0 ? '−60 dB' : 'muted'); }
+
+/** One console slider control: label + range (+ optional center-detent tick + value). */
+function miniSlider(opts) {
+  const g = document.createElement('div');
+  g.className = 'ctrl';
+  const lbl = document.createElement('span'); lbl.className = 'ctrl-lbl'; lbl.textContent = opts.label;
+  const wrap = document.createElement('span'); wrap.className = 'slide-wrap';
+  if (opts.detent) { const t = document.createElement('i'); t.className = 'detent-tick'; wrap.appendChild(t); }
+  const input = document.createElement('input');
+  input.type = 'range'; input.className = 'mini' + (opts.detent ? ' detent' : '');
+  input.min = String(opts.min); input.max = String(opts.max); input.value = String(opts.value);
+  wrap.appendChild(input);
+  g.append(lbl, wrap);
+  let valEl = null;
+  if (opts.fmtVal) { valEl = document.createElement('span'); valEl.className = 'ctrl-val'; valEl.textContent = opts.fmtVal(opts.value); g.appendChild(valEl); }
+  input.addEventListener('input', () => { const v = Number(input.value); if (valEl) valEl.textContent = opts.fmtVal(v); opts.onInput(v); });
+  return g;
+}
+
 function renderDeviceRow(ch) {
   const li = document.createElement('li');
   li.className = 'device' + (ch.enabled ? ' active' : '');
 
-  const enableWrap = document.createElement('div');
-  enableWrap.className = 'dev-enable';
+  const head = document.createElement('div');
+  head.className = 'row-head';
   const cb = document.createElement('input');
-  cb.type = 'checkbox';
-  cb.checked = ch.enabled;
+  cb.type = 'checkbox'; cb.className = 'cbx'; cb.checked = ch.enabled;
   cb.addEventListener('change', () => onToggleDevice(ch, cb, li));
-  enableWrap.appendChild(cb);
+  const name = document.createElement('span');
+  name.className = 'row-name'; name.textContent = ch.info.label;
+  head.append(cb, name);
+  if (ch.info.isDefault) head.appendChild(rowBadge('DEFAULT', 'default'));
+  const spacer = document.createElement('span'); spacer.className = 'row-spacer';
+  const db = document.createElement('span'); db.className = 'row-db'; db.textContent = fmtDb(ch.volume);
+  head.append(spacer, db);
 
-  const main = document.createElement('div');
-  main.className = 'dev-main';
+  const ctrls = document.createElement('div');
+  ctrls.className = 'row-ctrls';
+  ctrls.append(
+    miniSlider({ label: 'VOL', min: 0, max: 100, value: Math.round(ch.volume * 100), onInput: (v) => { ch.volume = v / 100; applyChannelVolume(ch); db.textContent = fmtDb(ch.volume); schedulePersist(); } }),
+    miniSlider({ label: 'BASS', min: -BASS_MAX_DB, max: BASS_MAX_DB, value: ch.bass, detent: true, fmtVal: (v) => (v > 0 ? `+${v}` : `${v}`), onInput: (v) => setBass(ch, v) }),
+  );
 
-  const name = document.createElement('div');
-  name.className = 'dev-name';
-  name.textContent = ch.info.label;
-  if (ch.info.isDefault) {
-    const badge = document.createElement('span');
-    badge.className = 'badge';
-    badge.textContent = 'default';
-    name.appendChild(badge);
-  }
-  main.appendChild(name);
-
-  const sliders = document.createElement('div');
-  sliders.className = 'dev-sliders';
-  sliders.appendChild(sliderGroup('Volume', 0, 100, Math.round(ch.volume * 100), '%', (v) => {
-    ch.volume = v / 100;
-    applyChannelVolume(ch);
-    schedulePersist();
-  }));
-  sliders.appendChild(sliderGroup('Bass', 0, BASS_MAX_DB, ch.bass, ' dB', (v) => { setBass(ch, v); }));
-  sliders.appendChild(delayControl(ch));
-  main.appendChild(sliders);
-
-  li.appendChild(enableWrap);
-  li.appendChild(main);
+  li.append(head, ctrls, delayControl(ch));
   return li;
 }
 
 async function onToggleDevice(ch, cb, li) {
   ch.enabled = cb.checked;
   li.classList.toggle('active', ch.enabled);
+  updateDevicesMeta();
   schedulePersist(); // remember the selection across sessions
 
   if (mode === 'live') {
@@ -834,60 +920,54 @@ function sliderGroup(label, min, max, value, unit, onInput) {
  */
 function delayControl(ch) {
   const g = document.createElement('div');
-  g.className = 'slider-group delay-group';
+  g.className = 'delaycomp';
 
-  const l = document.createElement('label');
-  l.textContent = 'Delay comp';
-
-  const slider = document.createElement('input');
-  slider.type = 'range';
-  slider.min = String(-DELAY_COMP_RANGE);
-  slider.max = String(DELAY_COMP_RANGE);
-  slider.step = '10';
-  slider.value = String(ch.offsetMs);
-
+  // head: label + a cyan ms field (lights up when non-zero)
+  const head = document.createElement('div'); head.className = 'dc-head';
+  const lbl = document.createElement('span'); lbl.className = 'dc-lbl'; lbl.textContent = 'DELAY COMP';
+  const field = document.createElement('div'); field.className = 'dc-field';
   const num = document.createElement('input');
-  num.type = 'number';
-  num.className = 'delay-num';
-  num.min = String(-DELAY_COMP_RANGE);
-  num.max = String(DELAY_COMP_RANGE);
-  num.step = '10';
-  num.value = String(ch.offsetMs);
+  num.type = 'number'; num.className = 'dc-num';
+  num.min = String(-DELAY_COMP_RANGE); num.max = String(DELAY_COMP_RANGE); num.step = '10'; num.value = String(ch.offsetMs);
+  const unit = document.createElement('span'); unit.className = 'dc-unit'; unit.textContent = 'ms';
+  field.append(num, unit);
+  head.append(lbl, field);
 
-  const unit = document.createElement('span');
-  unit.className = 'val';
-  unit.textContent = 'ms';
+  // nudges
+  const nudges = document.createElement('div'); nudges.className = 'dc-nudges';
+  // center-detent slider
+  const slideWrap = document.createElement('span'); slideWrap.className = 'slide-wrap';
+  const tick = document.createElement('i'); tick.className = 'detent-tick'; slideWrap.appendChild(tick);
+  const slider = document.createElement('input');
+  slider.type = 'range'; slider.className = 'mini detent';
+  slider.min = String(-DELAY_COMP_RANGE); slider.max = String(DELAY_COMP_RANGE); slider.step = '10'; slider.value = String(ch.offsetMs);
+  slideWrap.appendChild(slider);
 
+  // size the number input to its content so the field hugs the value (matches design)
+  const sizeNum = () => { num.style.width = `calc(${Math.max(1, String(num.value).length)}ch + 4px)`; };
   const apply = (v) => {
     v = Math.max(-DELAY_COMP_RANGE, Math.min(DELAY_COMP_RANGE, Math.round(v)));
     ch.offsetMs = v;
-    slider.value = String(v);
-    num.value = String(v);
+    slider.value = String(v); num.value = String(v);
+    field.classList.toggle('nonzero', v !== 0);
+    sizeNum();
     if (ch.live) ch.live.delay.delayTime.value = clampDelay(v);
     schedulePersist();
   };
-
   const nudge = (label, step) => {
     const b = document.createElement('button');
-    b.type = 'button';
-    b.className = 'nudge';
-    b.textContent = label;
+    b.type = 'button'; b.className = 'nudge'; b.textContent = label;
     b.title = `${step > 0 ? '+' : ''}${step} ms`;
     b.addEventListener('click', () => apply(ch.offsetMs + step));
     return b;
   };
-
+  nudges.append(nudge('−100', -100), nudge('−10', -10), nudge('+10', 10), nudge('+100', 100));
   slider.addEventListener('input', () => apply(Number(slider.value)));
   num.addEventListener('input', () => apply(Number(num.value)));
+  field.classList.toggle('nonzero', ch.offsetMs !== 0);
+  sizeNum();
 
-  g.appendChild(l);
-  g.appendChild(nudge('−100', -100));
-  g.appendChild(nudge('−10', -10));
-  g.appendChild(num);
-  g.appendChild(unit);
-  g.appendChild(nudge('+10', 10));
-  g.appendChild(nudge('+100', 100));
-  g.appendChild(slider);
+  g.append(head, nudges, slideWrap);
   return g;
 }
 
@@ -905,6 +985,7 @@ const CHIRP_SEC = 0.15;
 const WARMUP_SEC = 1.0;     // quiet pre-roll to wake Bluetooth links before the chirp
 const LOCAL_REC_SEC = 3.0;  // warm-up + high-latency device + chirp + margin
 const SONOS_REC_SEC = 3.5;  // Sonos buffers ~1.5–2 s, so record longer
+const AIRPLAY_REC_SEC = 4.0; // AirPlay TVs (e.g. The Frame) can buffer ~2 s — record longer still
 
 /** Fill an array with a windowed 800 Hz→6 kHz sweep at `sampleRate`. */
 function fillChirp(arr, sampleRate, durSec) {
@@ -1041,9 +1122,47 @@ async function measureSonosLatencySec(room, micStream) {
   }
 }
 
+/**
+ * AirPlay: stream silence to the receiver until its buffer is steady, then inject
+ * the chirp into that same live stream and time its arrival via the mic — the real
+ * broadcast latency the live audio will experience (TVs can be ~2 s behind).
+ */
+async function measureAirPlayLatencySec(receiver, micStream) {
+  const rate = 44100;
+  const silence = new Int16Array(Math.round(rate * 0.05) * 2); // 50 ms of zeros
+  const chirp = makeChirpPcm(rate);
+  const res = await window.api.airplayPlay([airplayPayload(receiver)]);
+  if (!res || !res.ok) return null;
+  const feed = setInterval(() => window.api.sendAirPlayPcm(silence.buffer), 50);
+  try {
+    await new Promise((r) => setTimeout(r, 5000)); // let AirPlay reach steady-state buffering
+    return await recordAndMeasure(micStream, AIRPLAY_REC_SEC, () => window.api.sendAirPlayPcm(chirp.buffer));
+  } finally {
+    clearInterval(feed);
+    await window.api.airplayStop([airplayKey(receiver)]);
+  }
+}
+
+/**
+ * Measure a network bus (Sonos / AirPlay) that's ALREADY connected via the live
+ * capture and is currently muted/silent during an auto-sync soft-pause. We inject
+ * the chirp straight into the live pipe — the receivers are never stopped or
+ * re-added, so AirPlay never re-pairs and Sonos never re-buffers.
+ */
+async function measureBusLatencyLive(micStream, sendPcm) {
+  const chirp = makeChirpPcm(44100);
+  await new Promise((r) => setTimeout(r, 1200)); // let the (now-silent) buffer settle
+  return await recordAndMeasure(micStream, AIRPLAY_REC_SEC, () => sendPcm(chirp.buffer));
+}
+
 function refreshSonosControls() {
   el.sonosControls.innerHTML = '';
   mountSonosControls();
+}
+
+function refreshAirPlayControls() {
+  el.airplayControls.innerHTML = '';
+  mountAirPlayControls();
 }
 
 /**
@@ -1058,6 +1177,7 @@ function undoAutoSync() {
       if (ch.live) ch.live.delay.delayTime.value = clampDelay(offsetMs);
     }
     setSonosDelay(autoSyncBackup.sonos);
+    if (typeof autoSyncBackup.airplay === 'number') setAirplayDelay(autoSyncBackup.airplay);
     autoSyncBackup = null;
     setStatus('Reverted to your delays from before Auto-sync.');
   } else {
@@ -1066,9 +1186,11 @@ function undoAutoSync() {
       if (ch.live) ch.live.delay.delayTime.value = 0;
     }
     setSonosDelay(0);
+    setAirplayDelay(0);
     setStatus('All delays reset to 0 — re-tune from scratch.');
   }
   refreshSonosControls();
+  refreshAirPlayControls();
   persistPrefs();
   renderDevices();
   el.btnAutoSync.textContent = '⊕ Auto-sync';
@@ -1078,14 +1200,28 @@ async function autoSync() {
   if (autoSyncing) return;
   const locals = enabledChannels();
   const rooms = selectedSonosRooms();
-  if (locals.length + rooms.length < 2) {
-    setStatus('Tick at least 2 speakers (Sonos counts), then Auto-sync.');
+  const receivers = selectedAirPlay();
+  if (locals.length + rooms.length + receivers.length < 2) {
+    setStatus('Tick at least 2 speakers (Sonos / AirPlay count), then Auto-sync.');
     return;
   }
 
   autoSyncing = true;
   el.btnAutoSync.disabled = true;
-  if (isPlaying) stop(); // don't measure over live playback
+  // Don't measure over live audio. For a LIVE session, soft-pause instead of a
+  // full stop: keep the network buses connected (silent) so AirPlay never
+  // re-pairs and Sonos never re-buffers — we'll inject the chirp into the live
+  // pipe and restore the session afterward.
+  const wasLive = playMode === 'live' && !!liveStream; // a live session is set up (playing OR paused)
+  const wasPlaying = isPlaying;
+  if (wasLive) {
+    setNetworkCapturePaused(true);
+    for (const ch of channels.values()) if (ch.live) ch.live.gain.gain.value = 0;
+    isPlaying = false;
+    stopBackdrop();
+  } else if (isPlaying) {
+    stop();
+  }
 
   let micStream;
   try {
@@ -1114,30 +1250,62 @@ async function autoSync() {
     let sonosLat = null;
     if (rooms.length) {
       setStatus('Auto-sync: measuring Sonos (this takes a few seconds)…');
-      try { sonosLat = await measureSonosLatencySec(rooms[0], micStream); } catch { /* skip */ }
+      try {
+        sonosLat = (wasLive && sonosActive.length)
+          ? await measureBusLatencyLive(micStream, window.api.sendSonosPcm)
+          : await measureSonosLatencySec(rooms[0], micStream);
+      } catch { /* skip */ }
+    }
+
+    // AirPlay rides one shared group delay (like Sonos), so one representative
+    // measurement shifts the whole AirPlay set together. While live, measure
+    // through the existing connection so the receivers are never re-paired.
+    let airplayLat = null;
+    if (receivers.length) {
+      setStatus('Auto-sync: measuring AirPlay (this takes a few seconds)…');
+      try {
+        airplayLat = (wasLive && airplayActive.length)
+          ? await measureBusLatencyLive(micStream, window.api.sendAirPlayPcm)
+          : await measureAirPlayLatencySec(receivers[0], micStream);
+      } catch { /* skip */ }
     }
 
     // Snapshot the current delays BEFORE overwriting, so a bad run can be undone.
     autoSyncBackup = {
       local: local.map((r) => ({ ch: r.ch, offsetMs: r.ch.offsetMs })),
       sonos: sonosDelayMs,
+      airplay: airplayDelayMs,
     };
 
-    const allLats = local.map((r) => r.lat).concat(sonosLat != null ? [sonosLat] : []);
+    const allLats = local.map((r) => r.lat)
+      .concat(sonosLat != null ? [sonosLat] : [])
+      .concat(airplayLat != null ? [airplayLat] : []);
     const maxLat = Math.max(...allLats);
     for (const { ch, lat } of local) {
       ch.offsetMs = Math.max(0, Math.min(DELAY_COMP_RANGE, Math.round((maxLat - lat) * 1000)));
       if (ch.live) ch.live.delay.delayTime.value = clampDelay(ch.offsetMs);
     }
     if (sonosLat != null) { setSonosDelay(Math.round((maxLat - sonosLat) * 1000)); refreshSonosControls(); }
+    if (airplayLat != null) { setAirplayDelay(Math.round((maxLat - airplayLat) * 1000)); refreshAirPlayControls(); }
 
     persistPrefs();
     renderDevices();
     const parts = local.map((r) => `${r.ch.info.label}: ${r.ch.offsetMs}ms`);
     if (sonosLat != null) parts.push(`Sonos: ${sonosDelayMs}ms`);
+    if (airplayLat != null) parts.push(`AirPlay: ${airplayDelayMs}ms`);
     setStatus(`Auto-sync done — ${parts.join(', ')}. Not better? Click “↩ Undo sync”.`);
   } finally {
     micStream.getTracks().forEach((t) => t.stop());
+    if (wasLive && wasPlaying) {
+      // Resume the live session exactly as it was — the buses were never dropped.
+      setNetworkCapturePaused(false);
+      for (const ch of enabledChannels()) applyChannelVolume(ch);
+      isPlaying = true;
+      playMode = 'live';
+      setPlayState(true);
+      startBackdrop();
+    }
+    // If it was PAUSED before, leave the buses connected-but-silent (as they were).
     autoSyncing = false;
     el.btnAutoSync.disabled = false;
   }
@@ -1170,9 +1338,45 @@ function audioTapNonInvasive() {
   return { analyser: null, cleanup: null };
 }
 
+// ---- Output VU meters (real levels) ----
+let vuRaf = 0; let vuCleanup = null; let vuAnalyser = null; let vuBuf = null; let vuLv = 0; let vuRv = 0;
+async function startVU() {
+  if (vuAnalyser) return;
+  // Ensure a tap exists — in file mode, route the reference through Web Audio
+  // (same path the visualizer/bass use) so the meter has signal.
+  if (!liveStream) { const ref = referenceChannel(); if (ref && !ref.fileGraph) { try { await ensureFileGraph(ref); } catch {} } }
+  const tap = audioTapNonInvasive();
+  if (!tap.analyser) return;
+  vuAnalyser = tap.analyser; vuCleanup = tap.cleanup;
+  vuAnalyser.fftSize = 1024; vuAnalyser.smoothingTimeConstant = 0.4;
+  vuBuf = new Float32Array(vuAnalyser.fftSize);
+  const tick = () => {
+    if (!vuAnalyser) return;
+    vuAnalyser.getFloatTimeDomainData(vuBuf);
+    let sum = 0; for (let i = 0; i < vuBuf.length; i++) sum += vuBuf[i] * vuBuf[i];
+    const rms = Math.sqrt(sum / vuBuf.length);
+    const db = rms > 0 ? 20 * Math.log10(rms) : -60;
+    const frac = Math.max(0, Math.min(1, (db + 50) / 50));
+    vuLv = frac > vuLv ? frac : vuLv * 0.86 + frac * 0.14;            // fast attack, slow release
+    vuRv = frac > vuRv ? frac * 0.96 : vuRv * 0.83 + frac * 0.17;     // slight L/R divergence
+    if (el.vuL) el.vuL.style.width = `${(vuLv * 100).toFixed(1)}%`;
+    if (el.vuR) el.vuR.style.width = `${(vuRv * 100).toFixed(1)}%`;
+    vuRaf = requestAnimationFrame(tick);
+  };
+  vuRaf = requestAnimationFrame(tick);
+}
+function stopVU() {
+  if (vuRaf) { cancelAnimationFrame(vuRaf); vuRaf = 0; }
+  if (vuCleanup) { try { vuCleanup(); } catch {} vuCleanup = null; }
+  vuAnalyser = null; vuBuf = null; vuLv = 0; vuRv = 0;
+  if (el.vuL) el.vuL.style.width = '0%';
+  if (el.vuR) el.vuR.style.width = '0%';
+}
+
 function startBackdrop() {
   document.body.classList.add('is-playing'); // lights the tally lamps + Play bias glow
   if (el.transportStatus) el.transportStatus.textContent = 'playing';
+  startVU();
   if (!el.vizOverlay.hidden) return; // fullscreen overlay is up; backdrop hidden anyway
   if (!bgVisualizer) bgVisualizer = new Visualizer(el.bgCanvas, { background: true });
   if (bgCleanup) { bgCleanup(); bgCleanup = null; }
@@ -1184,6 +1388,7 @@ function startBackdrop() {
 function stopBackdrop() {
   document.body.classList.remove('is-playing');
   if (el.transportStatus) el.transportStatus.textContent = 'standby';
+  stopVU();
   if (bgVisualizer) bgVisualizer.stop();
   if (bgCleanup) { bgCleanup(); bgCleanup = null; }
   el.bgCanvas.style.display = 'none'; // reveal the ambient background when idle
@@ -1255,10 +1460,14 @@ el.btnModeFile.addEventListener('click', () => setMode('file'));
 el.btnModeLive.addEventListener('click', () => setMode('live'));
 el.inputSelect.addEventListener('change', () => {
   inputDeviceId = el.inputSelect.value;
-  if (mode === 'live' && isPlaying) { stopLive(); isPlaying = false; el.btnPlay.textContent = '▶ Start'; setStatus('Input changed — press Start.'); }
+  if (mode === 'live' && isPlaying) { stopLive(); isPlaying = false; setPlayState(false); setStatus('Input changed — press Start.'); }
 });
 
-el.masterVol.addEventListener('input', () => { masterVolume = Number(el.masterVol.value) / 100; applyVolumes(); });
+el.masterVol.addEventListener('input', () => {
+  masterVolume = Number(el.masterVol.value) / 100;
+  if (el.masterDb) el.masterDb.textContent = masterVolume > 0 ? `${(20 * Math.log10(masterVolume)).toFixed(1)}` : '–∞';
+  applyVolumes();
+});
 
 el.seek.addEventListener('mousedown', () => { seeking = true; });
 el.seek.addEventListener('input', () => { el.timeCurrent.textContent = fmtTime((Number(el.seek.value) / 1000) * durationSec); });
@@ -1284,7 +1493,7 @@ let sonosCaptureBuilding = null;
 
 // Group-wide delay applied to the audio we stream to Sonos (Sonos can only be
 // pushed later, so 0..SONOS_MAX_DELAY ms). Persisted across sessions.
-const SONOS_MAX_DELAY = 3000;
+const SONOS_MAX_DELAY = 8000;
 const SONOS_DELAY_KEY = 'serializer.sonosDelay.v1';
 let sonosDelayMs = (() => {
   const v = parseInt(localStorage.getItem(SONOS_DELAY_KEY) || '0', 10);
@@ -1428,6 +1637,7 @@ async function stopSonosStream() {
 async function findSonos() {
   if (!window.api || !window.api.discoverSonos) return;
   el.btnFindSonos.disabled = true;
+  const doneDiscover = flashDiscovering(el.sonosDiscover);
   el.sonosHint.textContent = 'Searching your network for Sonos rooms…';
   try {
     sonosRooms = await window.api.discoverSonos();
@@ -1435,10 +1645,12 @@ async function findSonos() {
     sonosRooms = [];
     el.sonosHint.textContent = `Sonos search failed: ${err.message}`;
     el.btnFindSonos.disabled = false;
+    doneDiscover();
     return;
   }
   renderSonos();
   el.btnFindSonos.disabled = false;
+  doneDiscover();
 }
 
 function renderSonos() {
@@ -1452,100 +1664,95 @@ function renderSonos() {
   for (const room of sonosRooms) el.sonosList.appendChild(renderSonosRow(room));
 }
 
-/** One-time mount of the group-wide delay control above the room list. */
+/** One-time mount of the group-wide delay control, pinned to the panel bottom. */
 function mountSonosControls() {
   if (el.sonosControls.childElementCount) { el.sonosControls.hidden = false; return; }
-  const label = document.createElement('span');
-  label.className = 'sonos-controls-label';
-  label.textContent = 'Group delay';
-  el.sonosControls.appendChild(label);
-  el.sonosControls.appendChild(sonosDelayControl());
+  el.sonosControls.appendChild(groupDelayControl(() => sonosDelayMs, setSonosDelay, SONOS_MAX_DELAY));
   el.sonosControls.hidden = false;
 }
 
-/** Delay + nudge for the whole Sonos group (0..SONOS_MAX_DELAY ms, add-only). */
-function sonosDelayControl() {
-  const g = document.createElement('div');
-  g.className = 'slider-group delay-group';
+/**
+ * Console "GROUP DELAY" row: label · nudges · fill slider · ms field.
+ * add-only 0..max ms. `get` reads the live value, `set` clamps + applies it.
+ */
+function groupDelayControl(get, set, max) {
+  const row = document.createElement('div');
+  row.className = 'gdelay';
 
+  const label = document.createElement('span');
+  label.className = 'gd-label'; label.textContent = 'GROUP DELAY';
+
+  const nudges = document.createElement('div');
+  nudges.className = 'gd-nudges';
+
+  const slideWrap = document.createElement('div');
+  slideWrap.className = 'gd-slide';
   const slider = document.createElement('input');
-  slider.type = 'range';
-  slider.min = '0'; slider.max = String(SONOS_MAX_DELAY); slider.step = '10';
-  slider.value = String(sonosDelayMs);
+  slider.type = 'range'; slider.className = 'mini';
+  slider.min = '0'; slider.max = String(max); slider.step = '10';
+  slideWrap.appendChild(slider);
 
+  const field = document.createElement('div');
+  field.className = 'gd-field';
   const num = document.createElement('input');
-  num.type = 'number';
-  num.className = 'delay-num';
-  num.min = '0'; num.max = String(SONOS_MAX_DELAY); num.step = '10';
-  num.value = String(sonosDelayMs);
+  num.type = 'number'; num.className = 'gd-num';
+  num.min = '0'; num.max = String(max); num.step = '10';
+  const ms = document.createElement('span'); ms.className = 'ms'; ms.textContent = 'ms';
+  field.append(num, ms);
 
-  const unit = document.createElement('span');
-  unit.className = 'val';
-  unit.textContent = 'ms';
-
-  const apply = (v) => {
-    setSonosDelay(v);
-    slider.value = String(sonosDelayMs);
-    num.value = String(sonosDelayMs);
+  const sync = () => {
+    const v = get();
+    slider.value = String(v);
+    slider.style.setProperty('--fill', `${max ? (v / max) * 100 : 0}%`);
+    if (document.activeElement !== num) num.value = String(v);
+    field.classList.toggle('nonzero', v > 0);
   };
-  const nudge = (text, step) => {
-    const b = document.createElement('button');
-    b.type = 'button'; b.className = 'nudge'; b.textContent = text;
-    b.addEventListener('click', () => apply(sonosDelayMs + step));
-    return b;
-  };
+  const apply = (v) => { set(v); sync(); };
   slider.addEventListener('input', () => apply(Number(slider.value)));
   num.addEventListener('input', () => apply(Number(num.value)));
 
-  g.appendChild(nudge('−100', -100));
-  g.appendChild(nudge('−10', -10));
-  g.appendChild(num);
-  g.appendChild(unit);
-  g.appendChild(nudge('+10', 10));
-  g.appendChild(nudge('+100', 100));
-  g.appendChild(slider);
-  return g;
+  const nudge = (text, step, wide) => {
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'nudge' + (wide ? ' wide' : ''); b.textContent = text;
+    b.addEventListener('click', () => apply(get() + step));
+    return b;
+  };
+  nudges.append(nudge('−100', -100, true), nudge('−10', -10), nudge('+10', 10), nudge('+100', 100, true));
+
+  row.append(label, nudges, slideWrap, field);
+  sync();
+  return row;
+}
+
+/** Compact console network-row scaffold: checkbox + name/badge/subline. */
+function netRow(activeId, enabledSet, name, badgeText, badgeKind, subText, onToggle) {
+  const li = document.createElement('li');
+  li.className = 'net-row' + (enabledSet.has(activeId) ? ' active' : '');
+  const line = document.createElement('div'); line.className = 'net-line';
+  const cb = document.createElement('input');
+  cb.type = 'checkbox'; cb.className = 'cbx'; cb.checked = enabledSet.has(activeId);
+  cb.addEventListener('change', () => onToggle(cb, li));
+  const info = document.createElement('div'); info.className = 'net-info';
+  const top = document.createElement('div'); top.className = 'net-top';
+  const nm = document.createElement('span'); nm.className = 'net-name'; nm.textContent = name;
+  top.appendChild(nm);
+  if (badgeText) top.appendChild(rowBadge(badgeText, badgeKind));
+  const sub = document.createElement('div'); sub.className = 'net-sub'; sub.textContent = subText;
+  info.append(top, sub);
+  line.append(cb, info);
+  li.appendChild(line);
+  return { li, line };
 }
 
 function renderSonosRow(room) {
-  const li = document.createElement('li');
-  li.className = 'device sonos-device' + (sonosEnabled.has(room.id) ? ' active' : '');
-
-  const enableWrap = document.createElement('div');
-  enableWrap.className = 'dev-enable';
-  const cb = document.createElement('input');
-  cb.type = 'checkbox';
-  cb.checked = sonosEnabled.has(room.id);
-  cb.addEventListener('change', () => onToggleSonos(room, cb, li));
-  enableWrap.appendChild(cb);
-
-  const main = document.createElement('div');
-  main.className = 'dev-main';
-  const name = document.createElement('div');
-  name.className = 'dev-name';
-  name.textContent = room.roomName;
-  const badge = document.createElement('span');
-  badge.className = 'badge';
-  badge.textContent = room.model;
-  name.appendChild(badge);
-  main.appendChild(name);
-
-  const sub = document.createElement('div');
-  sub.className = 'dev-sub';
-  sub.textContent = `${room.ip} · ${room.model}`;
-  main.appendChild(sub);
-
-  // Native Sonos volume + bass, applied over the network (per room).
-  const sliders = document.createElement('div');
-  sliders.className = 'dev-sliders';
+  const { li, line } = netRow(room.id, sonosEnabled, room.roomName, room.model, 'model', `${room.ip} · ${room.model}`,
+    (cb) => onToggleSonos(room, cb, li));
   const pushVol = throttle((v) => window.api.sonosSetVolume(room.ip, v), 80);
-  sliders.appendChild(sliderGroup('Volume', 0, 100, room.volume ?? 25, '%', (v) => { room.volume = v; pushVol(v); }));
   const pushBass = throttle((v) => window.api.sonosSetBass(room.ip, v), 80);
-  sliders.appendChild(sliderGroup('Bass', -10, 10, room.bass ?? 0, '', (v) => { room.bass = v; pushBass(v); }));
-  main.appendChild(sliders);
-
-  li.appendChild(enableWrap);
-  li.appendChild(main);
+  line.append(
+    miniSlider({ label: 'V', min: 0, max: 100, value: room.volume ?? 25, onInput: (v) => { room.volume = v; pushVol(v); } }),
+    miniSlider({ label: 'B', min: -10, max: 10, value: room.bass ?? 0, detent: true, onInput: (v) => { room.bass = v; pushBass(v); } }),
+  );
   return li;
 }
 
@@ -1592,7 +1799,7 @@ let airplayActive = [];
 
 // Group-wide delay applied to the AirPlay feed (receivers can only be pushed
 // later, like Sonos). Persisted across sessions.
-const AIRPLAY_MAX_DELAY = 3000;
+const AIRPLAY_MAX_DELAY = 8000;
 const AIRPLAY_DELAY_KEY = 'serializer.airplayDelay.v1';
 let airplayDelayMs = (() => {
   const v = parseInt(localStorage.getItem(AIRPLAY_DELAY_KEY) || '0', 10);
@@ -1727,6 +1934,7 @@ async function stopAirPlayStream() {
 async function findAirPlay() {
   if (!window.api || !window.api.discoverAirPlay) return;
   el.btnFindAirPlay.disabled = true;
+  const doneDiscover = flashDiscovering(el.airplayDiscover);
   el.airplayHint.textContent = 'Searching your network for AirPlay devices…';
   try {
     airplayDevices = await window.api.discoverAirPlay();
@@ -1734,10 +1942,12 @@ async function findAirPlay() {
     airplayDevices = [];
     el.airplayHint.textContent = `AirPlay search failed: ${err.message}`;
     el.btnFindAirPlay.disabled = false;
+    doneDiscover();
     return;
   }
   renderAirPlay();
   el.btnFindAirPlay.disabled = false;
+  doneDiscover();
 }
 
 function renderAirPlay() {
@@ -1755,100 +1965,20 @@ function renderAirPlay() {
 /** One-time mount of the group-wide delay control above the device list. */
 function mountAirPlayControls() {
   if (el.airplayControls.childElementCount) { el.airplayControls.hidden = false; return; }
-  const label = document.createElement('span');
-  label.className = 'sonos-controls-label';
-  label.textContent = 'Group delay';
-  el.airplayControls.appendChild(label);
-  el.airplayControls.appendChild(airplayDelayControl());
+  el.airplayControls.appendChild(groupDelayControl(() => airplayDelayMs, setAirplayDelay, AIRPLAY_MAX_DELAY));
   el.airplayControls.hidden = false;
 }
 
-/** Delay + nudge for the whole AirPlay set (0..AIRPLAY_MAX_DELAY ms, add-only). */
-function airplayDelayControl() {
-  const g = document.createElement('div');
-  g.className = 'slider-group delay-group';
-
-  const slider = document.createElement('input');
-  slider.type = 'range';
-  slider.min = '0'; slider.max = String(AIRPLAY_MAX_DELAY); slider.step = '10';
-  slider.value = String(airplayDelayMs);
-
-  const num = document.createElement('input');
-  num.type = 'number';
-  num.className = 'delay-num';
-  num.min = '0'; num.max = String(AIRPLAY_MAX_DELAY); num.step = '10';
-  num.value = String(airplayDelayMs);
-
-  const unit = document.createElement('span');
-  unit.className = 'val';
-  unit.textContent = 'ms';
-
-  const apply = (v) => {
-    setAirplayDelay(v);
-    slider.value = String(airplayDelayMs);
-    num.value = String(airplayDelayMs);
-  };
-  const nudge = (text, step) => {
-    const b = document.createElement('button');
-    b.type = 'button'; b.className = 'nudge'; b.textContent = text;
-    b.addEventListener('click', () => apply(airplayDelayMs + step));
-    return b;
-  };
-  slider.addEventListener('input', () => apply(Number(slider.value)));
-  num.addEventListener('input', () => apply(Number(num.value)));
-
-  g.appendChild(nudge('−100', -100));
-  g.appendChild(nudge('−10', -10));
-  g.appendChild(num);
-  g.appendChild(unit);
-  g.appendChild(nudge('+10', 10));
-  g.appendChild(nudge('+100', 100));
-  g.appendChild(slider);
-  return g;
-}
-
 function renderAirPlayRow(dev) {
-  const li = document.createElement('li');
-  li.className = 'device sonos-device' + (airplayEnabled.has(dev.id) ? ' active' : '');
-  li.dataset.key = dev.id;
-
-  const enableWrap = document.createElement('div');
-  enableWrap.className = 'dev-enable';
-  const cb = document.createElement('input');
-  cb.type = 'checkbox';
-  cb.checked = airplayEnabled.has(dev.id);
-  cb.addEventListener('change', () => onToggleAirPlay(dev, cb, li));
-  enableWrap.appendChild(cb);
-
-  const main = document.createElement('div');
-  main.className = 'dev-main';
-  const name = document.createElement('div');
-  name.className = 'dev-name';
-  name.textContent = dev.name;
-  const badge = document.createElement('span');
-  badge.className = 'badge';
-  badge.textContent = dev.airplay2 ? 'AirPlay 2' : 'AirPlay';
-  name.appendChild(badge);
-  main.appendChild(name);
-
-  const sub = document.createElement('div');
-  sub.className = 'dev-sub';
-  sub.textContent = `${dev.host} · ${dev.model}`;
-  main.appendChild(sub);
-
-  // AirPlay receivers don't pass through our Web Audio gain, so volume is sent to
-  // the device over the protocol.
-  const sliders = document.createElement('div');
-  sliders.className = 'dev-sliders';
+  const { li, line } = netRow(dev.id, airplayEnabled, dev.name, dev.airplay2 ? 'AIRPLAY 2' : 'AIRPLAY', 'air',
+    `${dev.host} · ${dev.model}`, (cb) => onToggleAirPlay(dev, cb, li));
+  li.dataset.key = dev.id; // promptAirPlayPasscode finds the row by this
   dev.volume = airplayVols[dev.id] ?? dev.volume ?? 50; // restore saved level
   const pushVol = throttle((v) => window.api.airplaySetVolume(dev.id, v), 120);
-  sliders.appendChild(sliderGroup('Volume', 0, 100, dev.volume, '%', (v) => {
-    dev.volume = v; airplayVols[dev.id] = v; persistAirplayVols(); pushVol(v);
+  line.appendChild(miniSlider({
+    label: 'VOL', min: 0, max: 100, value: dev.volume, fmtVal: (v) => `${v}%`,
+    onInput: (v) => { dev.volume = v; airplayVols[dev.id] = v; persistAirplayVols(); pushVol(v); },
   }));
-  main.appendChild(sliders);
-
-  li.appendChild(enableWrap);
-  li.appendChild(main);
   return li;
 }
 
@@ -1870,31 +2000,66 @@ async function onToggleAirPlay(dev, cb, li) {
 // sender emits 'need_password'; we collect the code inline and send it back.
 function promptAirPlayPasscode(key, name) {
   const li = el.airplayList.querySelector(`li[data-key="${CSS.escape(key)}"]`);
-  if (!li || li.querySelector('.airplay-pin')) return;
-  const form = document.createElement('form');
-  form.className = 'airplay-pin';
-  const input = document.createElement('input');
-  input.type = 'text';
-  input.inputMode = 'numeric';
-  input.placeholder = `Code on “${name}”`;
-  input.className = 'delay-num';
-  const submit = document.createElement('button');
-  submit.type = 'submit'; submit.className = 'btn btn-ghost'; submit.textContent = 'Pair';
-  form.addEventListener('submit', (e) => {
-    e.preventDefault();
-    const code = input.value.trim();
-    if (code) { window.api.airplaySendPasscode(key, code); setStatus(`Pairing with “${name}”…`); }
-  });
-  form.appendChild(input);
-  form.appendChild(submit);
-  li.querySelector('.dev-main').appendChild(form);
-  input.focus();
+  if (!li || li.querySelector('.pin-pair')) return;
+  li.classList.add('pairing');
+
+  // "PAIRING" badge pinned to the far right of the row (VOL is hidden via CSS
+  // while pairing, so the name column gets the room it needs).
+  const line = li.querySelector('.net-line');
+  if (line && !line.querySelector('.pin-status')) {
+    const st = document.createElement('span'); st.className = 'pin-status'; st.textContent = 'PAIRING';
+    line.appendChild(st);
+  }
+
+  const block = document.createElement('div');
+  block.className = 'pin-pair';
+  const prompt = document.createElement('span');
+  prompt.className = 'pin-prompt';
+  prompt.textContent = `Enter the 4-digit code shown on “${name}”.`;
+
+  const cells = document.createElement('div'); cells.className = 'pin-cells';
+  const inputs = [];
+  const doPair = () => {
+    const code = inputs.map((c) => c.value).join('');
+    if (code.length === 4) { window.api.airplaySendPasscode(key, code); setStatus(`Pairing with “${name}”…`); }
+    else (inputs.find((c) => !c.value) || inputs[0]).focus();
+  };
+  for (let i = 0; i < 4; i++) {
+    const c = document.createElement('input');
+    c.className = 'pin-cell'; c.type = 'text'; c.inputMode = 'numeric'; c.maxLength = 1;
+    c.addEventListener('input', () => {
+      c.value = c.value.replace(/\D/g, '').slice(0, 1);
+      if (c.value && i < 3) inputs[i + 1].focus();
+    });
+    c.addEventListener('keydown', (e) => {
+      if (e.key === 'Backspace' && !c.value && i > 0) inputs[i - 1].focus();
+      else if (e.key === 'Enter') doPair();
+    });
+    inputs.push(c); cells.appendChild(c);
+  }
+
+  const actions = document.createElement('div'); actions.className = 'pin-actions';
+  const pair = document.createElement('button');
+  pair.type = 'button'; pair.className = 'pin-pair-btn'; pair.textContent = 'Pair';
+  pair.addEventListener('click', doPair);
+  const cancel = document.createElement('button');
+  cancel.type = 'button'; cancel.className = 'pin-cancel-btn'; cancel.textContent = 'Cancel';
+  cancel.addEventListener('click', () => clearAirPlayPasscode(key));
+  actions.append(pair, cancel);
+
+  block.append(prompt, cells, actions);
+  li.appendChild(block);
+  inputs[0].focus();
 }
 
 function clearAirPlayPasscode(key) {
   const li = el.airplayList.querySelector(`li[data-key="${CSS.escape(key)}"]`);
-  const form = li && li.querySelector('.airplay-pin');
-  if (form) form.remove();
+  if (!li) return;
+  li.classList.remove('pairing');
+  const block = li.querySelector('.pin-pair');
+  if (block) block.remove();
+  const st = li.querySelector('.pin-status');
+  if (st) st.remove();
 }
 
 function handleAirPlayStatus({ key, status, desc }) {
@@ -1926,11 +2091,31 @@ function handleAirPlayStatus({ key, status, desc }) {
 el.btnFindAirPlay.addEventListener('click', findAirPlay);
 if (window.api && window.api.onAirPlayStatus) window.api.onAirPlayStatus(handleAirPlayStatus);
 
+// ---- Echo banner: mute local output / dismiss --------------------------------
+function setLocalMuted(muted) {
+  localMuted = muted;
+  applyVolumes();
+  if (el.btnMuteLocal) {
+    el.btnMuteLocal.textContent = muted ? 'Unmute local output' : 'Mute local output';
+    el.btnMuteLocal.classList.toggle('on', muted);
+  }
+}
+if (el.btnMuteLocal) el.btnMuteLocal.addEventListener('click', () => setLocalMuted(!localMuted));
+if (el.btnEchoDismiss) el.btnEchoDismiss.addEventListener('click', () => { el.sonosWarn.hidden = true; });
+
 // ---- Fader fill: paint the amber portion of every range to its value --------
 function paintRange(r) {
   const min = Number(r.min) || 0; const max = Number(r.max) || 100; const v = Number(r.value);
   const pct = max > min ? ((v - min) / (max - min)) * 100 : 0;
-  r.style.setProperty('--fill', `${pct}%`);
+  if (r.classList.contains('detent')) {
+    // bidirectional: teal grows from where 0 sits (the detent) toward the thumb
+    const center = max > min ? ((0 - min) / (max - min)) * 100 : 50;
+    r.style.setProperty('--a', `${Math.min(center, pct)}%`);
+    r.style.setProperty('--b', `${Math.max(center, pct)}%`);
+    r.style.setProperty('--thumb', Math.abs(pct - center) < 0.5 ? '#aeb4be' : 'var(--cyan-thumb)');
+  } else {
+    r.style.setProperty('--fill', `${pct}%`);
+  }
 }
 function paintAllRanges() { document.querySelectorAll('input[type="range"]').forEach(paintRange); }
 document.addEventListener('input', (e) => { if (e.target && e.target.type === 'range') paintRange(e.target); }, true);
@@ -1939,16 +2124,37 @@ new MutationObserver(paintAllRanges).observe(el.deviceList, { childList: true })
 new MutationObserver(paintAllRanges).observe(el.sonosList, { childList: true });
 new MutationObserver(paintAllRanges).observe(el.airplayList, { childList: true });
 
-// ---- Slate SMPTE timecode mirrors the transport time (no transport changes) -
-function toSmpte(t) {
-  const m = /(\d+):(\d+)/.exec(t || '');
-  if (!m) return '00:00:00:00';
-  return `00:${String(Number(m[1])).padStart(2, '0')}:${m[2].padStart(2, '0')}:00`;
+// ---- Header chrome: mirror transport time + live wall-clock + active tally ----
+if (el.timecode) {
+  new MutationObserver(() => {
+    el.timecode.textContent = el.timeCurrent.textContent || '0:00';
+    if (el.timecodeTotal) el.timecodeTotal.textContent = `/ ${el.timeTotal.textContent || '0:00'}`;
+  }).observe(el.timeCurrent, { childList: true, characterData: true, subtree: true });
 }
-if (el.slateTc) {
-  new MutationObserver(() => { el.slateTc.textContent = toSmpte(el.timeCurrent.textContent); })
-    .observe(el.timeCurrent, { childList: true, characterData: true, subtree: true });
+function updateHeaderChrome() {
+  if (el.wallclock) {
+    const d = new Date();
+    const p = (n) => String(n).padStart(2, '0');
+    el.wallclock.textContent = `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  }
+  if (el.tally) {
+    const n = enabledChannels().length + selectedSonosRooms().length + selectedAirPlay().length;
+    el.tally.textContent = `${n} ACTIVE`;
+    el.tally.parentElement?.classList.toggle('on', isPlaying && n > 0);
+  }
+  const live = playMode === 'live';
+  if (el.transportStatus) el.transportStatus.textContent = !isPlaying ? 'STANDBY' : (live ? 'LIVE' : 'PLAYING');
+  if (el.statusPill) {
+    el.statusPill.classList.toggle('standby', !isPlaying);
+    el.statusPill.classList.toggle('live', isPlaying && live);
+  }
+  if (el.statusSys) {
+    const n = enabledChannels().length + selectedSonosRooms().length + selectedAirPlay().length;
+    el.statusSys.textContent = `${n} active · 48 kHz · CoreAudio`;
+  }
 }
+updateHeaderChrome();
+setInterval(updateHeaderChrome, 1000);
 
 scanDevices();
 findSonos();
@@ -1958,16 +2164,18 @@ paintAllRanges();
 // ---- Dashboard: draggable / resizable, add-or-remove panels ----------------
 (() => {
   const PANELS = [
-    { id: 'transport', name: 'Master · Transport', tag: '', w: 7, h: 11 },
-    { id: 'devices', name: 'Output Bus', tag: '', w: 5, h: 11 },
-    { id: 'sonos', name: 'Sonos', tag: 'network', w: 6, h: 8 },
-    { id: 'airplay', name: 'AirPlay', tag: 'network', w: 6, h: 8 },
+    { id: 'transport', name: 'Master · Transport', tag: '', w: 4, h: 15 },
+    { id: 'devices', name: 'Output Bus', tag: '', w: 8, h: 15 },
+    { id: 'sonos', name: 'Sonos', tag: 'network', w: 4, h: 9 },
+    { id: 'airplay', name: 'AirPlay', tag: 'network', w: 4, h: 9 },
   ];
+  // Narrow transport column + wide output bus, tall enough for the full transport
+  // stack (incl. the bottom-pinned VU). Mirrors the design's 3-column proportions.
   const DEFAULT_LAYOUT = [
-    { i: 'transport', x: 0, y: 0, w: 7, h: 11 },
-    { i: 'devices', x: 7, y: 0, w: 5, h: 11 },
+    { i: 'transport', x: 0, y: 0, w: 4, h: 15 },
+    { i: 'devices', x: 4, y: 0, w: 8, h: 15 },
   ];
-  const LAYOUT_KEY = 'serializer.layout.v1';
+  const LAYOUT_KEY = 'serializer.layout.v2';
   const ROW = 26;     // px per grid row
   const MARGIN = 12;  // px gap between cells
 
