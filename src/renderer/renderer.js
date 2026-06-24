@@ -1,6 +1,7 @@
 'use strict';
 
 import { Visualizer } from './visualizer.js';
+import { COLS, moveElement, resizeElement, addElement, removeElement, bottom } from './grid-layout.js';
 
 /**
  * Serializer renderer.
@@ -89,6 +90,10 @@ let seeking = false;
 // live state
 let inputDeviceId = '';
 let liveStream = null;
+// While paused in Live mode we keep the Sonos/AirPlay captures alive but feed
+// them silence, so the receivers stay grouped + buffered and resume in sync
+// instead of re-buffering (~1.5–2 s) from scratch.
+let networkCapturePaused = false;
 
 // input meter state
 let meterCtx = null;
@@ -97,7 +102,7 @@ let meterData = null;
 let meterRaf = 0;
 let meterPeakHold = 0; // smoothed peak, 0..1
 
-const DRIFT_THRESHOLD = 0.08; // seconds
+const DRIFT_THRESHOLD = 0.04; // seconds — re-align a file speaker once it drifts past this
 const MAX_DELAY = 3.0;        // DelayNode max (seconds) — big enough for AirPlay/Sonos buffering
 const DELAY_COMP_RANGE = 3000; // delay-comp slider span (± ms)
 const BASS_FREQ = 200;        // low-shelf corner (Hz) — boosts everything below this
@@ -115,11 +120,19 @@ const savedPrefs = loadPrefs();
 function persistPrefs() {
   const out = {};
   for (const [id, ch] of channels) {
-    if (ch.offsetMs !== 0 || ch.volume !== 1 || ch.bass !== 0) {
-      out[id] = { offsetMs: ch.offsetMs, volume: ch.volume, bass: ch.bass };
+    // Remember a speaker if it's selected OR has any tuned value, so the same
+    // speakers come back pre-selected (with their delay/volume/bass) next launch.
+    if (ch.enabled || ch.offsetMs !== 0 || ch.volume !== 1 || ch.bass !== 0) {
+      out[id] = { enabled: ch.enabled, offsetMs: ch.offsetMs, volume: ch.volume, bass: ch.bass };
     }
   }
   try { localStorage.setItem(PREFS_KEY, JSON.stringify(out)); } catch {}
+}
+
+/** Load a persisted array of selected ids (Sonos rooms / AirPlay receivers). */
+function loadIdSet(key) {
+  try { const a = JSON.parse(localStorage.getItem(key)); return Array.isArray(a) ? a : []; }
+  catch { return []; }
 }
 // Persistence is blocking (synchronous localStorage); never run it on a slider's
 // per-`input` hot path — debounce so it fires only after dragging settles.
@@ -195,7 +208,16 @@ async function scanDevices() {
     }
   }
   for (const [id, ch] of channels) {
-    if (!seen.has(id) && !ch.enabled) channels.delete(id);
+    if (seen.has(id)) continue;
+    if (ch.enabled) {
+      // A selected speaker vanished — stop using its dead sink and deselect it.
+      // (Its saved prefs survive, so it re-selects itself if it comes back.)
+      teardownLiveNode(ch);
+      try { ch.audio.pause(); } catch {}
+      ch.enabled = false;
+      setStatus(`"${ch.info.label}" disconnected.`);
+    }
+    channels.delete(id);
   }
 
   renderDevices();
@@ -217,6 +239,7 @@ function addChannel(info) {
     ch.volume = typeof saved.volume === 'number' ? saved.volume : 1;
     ch.offsetMs = typeof saved.offsetMs === 'number' ? saved.offsetMs : 0;
     ch.bass = typeof saved.bass === 'number' ? saved.bass : 0;
+    ch.enabled = saved.enabled === true; // restore which speakers were selected
   }
   channels.set(info.deviceId, ch);
 }
@@ -265,14 +288,35 @@ function attachSource(ch) {
     const a = ch.audio;
     a.src = currentObjectUrl;
     applyChannelVolume(ch);
+    // Always settle exactly once — on metadata, on decode error, or on a timeout.
+    // Otherwise an undecodable file would never fire 'loadedmetadata' and the
+    // loadFile() Promise.all would hang forever (Play/Stop never enable).
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      a.removeEventListener('loadedmetadata', onMeta);
+      a.removeEventListener('error', onErr);
+      resolve();
+    };
     const onMeta = () => {
       durationSec = Math.max(durationSec, a.duration || 0);
       el.timeTotal.textContent = fmtTime(durationSec);
       el.trackSub.textContent = 'Ready';
-      a.removeEventListener('loadedmetadata', onMeta);
-      applySink(ch).finally(resolve);
+      applySink(ch).finally(finish);
     };
+    const onErr = () => {
+      el.trackSub.textContent = 'Could not decode this file';
+      setStatus(`Could not load "${trackName}" — unsupported or corrupt file.`);
+      finish();
+    };
+    const timer = setTimeout(() => {
+      setStatus(`"${trackName}" took too long to load.`);
+      finish();
+    }, 15000);
     a.addEventListener('loadedmetadata', onMeta);
+    a.addEventListener('error', onErr);
     a.load();
   });
 }
@@ -323,6 +367,7 @@ async function startLive() {
     setStatus(`Live: routing "${inputName}" to ${active.length} speaker${active.length > 1 ? 's' : ''}.`);
     if (selectedSonosRooms().length) refreshSonosStream();
     if (selectedAirPlay().length) refreshAirPlayStream();
+    setNetworkCapturePaused(false); // unmute the captures on (re)start / resume
     startBackdrop();
   } finally {
     startingLive = false;
@@ -398,11 +443,27 @@ function teardownLiveNode(ch) {
 }
 
 function stopLive() {
+  networkCapturePaused = false;
   stopMeter();
   stopSonosStream();
   stopAirPlayStream();
   for (const ch of channels.values()) teardownLiveNode(ch);
   if (liveStream) { liveStream.getTracks().forEach((t) => t.stop()); liveStream = null; }
+}
+
+/**
+ * Pause/resume the network broadcast WITHOUT tearing it down: ramp each capture's
+ * pre-worklet mute gain so the receivers keep their primed buffer (silence while
+ * paused) and resume aligned. A capture built while paused comes up muted too.
+ */
+function setNetworkCapturePaused(paused) {
+  networkCapturePaused = paused;
+  for (const cap of [sonosCapture, airplayCapture]) {
+    if (cap && cap.muteGain) {
+      const t = cap.ctx.currentTime;
+      cap.muteGain.gain.setTargetAtTime(paused ? 0 : 1, t, 0.02);
+    }
+  }
 }
 
 function clampDelay(ms) { return Math.max(0, Math.min(MAX_DELAY, ms / 1000)); }
@@ -478,7 +539,9 @@ async function play() {
   const base = ref.audio.currentTime;
   for (const ch of active) {
     if (ch === ref) continue; // reference is the timing anchor — matches syncTick
-    const target = base - ch.offsetMs / 1000; // +offset = play earlier content = come out later
+    // Compensate relative to the reference's OWN offset, so the reference's
+    // delay-comp isn't silently dropped when it isn't the slowest speaker.
+    const target = base - (ch.offsetMs - ref.offsetMs) / 1000; // +offset = earlier content = comes out later
     if (Math.abs(ch.audio.currentTime - target) > 0.02) ch.audio.currentTime = Math.max(0, target);
   }
   await Promise.allSettled(active.map((ch) => ch.audio.play()));
@@ -498,8 +561,7 @@ function pause() {
     // via the Stop button, does the full teardown.)
     for (const ch of channels.values()) if (ch.live) ch.live.gain.gain.value = 0;
     stopMeter();
-    stopSonosStream();
-    stopAirPlayStream();
+    setNetworkCapturePaused(true); // mute Sonos/AirPlay but keep them primed
     isPlaying = false;
     el.btnPlay.textContent = '▶ Start';
     setStatus('Live paused.');
@@ -527,9 +589,10 @@ function togglePlay() { if (isPlaying) pause(); else play(); }
 function seekTo(fraction) {
   const t = fraction * durationSec;
   const ref = referenceChannel();
+  const refOff = ref ? ref.offsetMs : 0;
   for (const ch of channels.values()) {
-    // Anchor the reference at t (no self-offset), others compensated — matches syncTick.
-    const target = ch === ref ? t : t - ch.offsetMs / 1000;
+    // Anchor at t, others compensated relative to the reference's own offset — matches syncTick.
+    const target = t - (ch.offsetMs - refOff) / 1000;
     ch.audio.currentTime = Math.max(0, target);
   }
   el.timeCurrent.textContent = fmtTime(t);
@@ -543,7 +606,7 @@ function syncTick() {
   const base = ref.audio.currentTime;
   for (const ch of enabledChannels()) {
     if (ch === ref) continue;
-    const target = base - ch.offsetMs / 1000;
+    const target = base - (ch.offsetMs - ref.offsetMs) / 1000;
     if (Math.abs(ch.audio.currentTime - target) > DRIFT_THRESHOLD) ch.audio.currentTime = Math.max(0, target);
   }
   if (!seeking && durationSec > 0) {
@@ -715,6 +778,7 @@ function renderDeviceRow(ch) {
 async function onToggleDevice(ch, cb, li) {
   ch.enabled = cb.checked;
   li.classList.toggle('active', ch.enabled);
+  schedulePersist(); // remember the selection across sessions
 
   if (mode === 'live') {
     if (ch.enabled) {
@@ -1202,11 +1266,17 @@ el.seek.addEventListener('change', () => { seekTo(Number(el.seek.value) / 1000);
 
 navigator.mediaDevices.addEventListener('devicechange', scanDevices);
 
+// Release the live input + AudioContexts and stop the network broadcasts when the
+// window unloads (the main process also stops Sonos/AirPlay as a backstop).
+window.addEventListener('beforeunload', () => { try { stopLive(); } catch {} });
+
 // ---- Sonos (network) discovery + streaming ----
 /** @type {Array<{id:string, ip:string, roomName:string, model:string}>} */
 let sonosRooms = [];
-/** @type {Set<string>} enabled room ids */
-const sonosEnabled = new Set();
+/** @type {Set<string>} enabled room ids (restored from last session) */
+const SONOS_SEL_KEY = 'serializer.sonosSelected.v1';
+const sonosEnabled = new Set(loadIdSet(SONOS_SEL_KEY));
+function persistSonosSel() { try { localStorage.setItem(SONOS_SEL_KEY, JSON.stringify([...sonosEnabled])); } catch {} }
 /** @type {?{ctx: AudioContext, src: MediaStreamAudioSourceNode, delay: DelayNode, node: AudioNode, zero: GainNode}} */
 let sonosCapture = null;
 /** @type {?Promise<any>} guards against concurrent (async) capture builds */
@@ -1257,6 +1327,8 @@ async function buildSonosCapture() {
     try {
       ctx = new AudioContext({ sampleRate: 44100 });
       const src = ctx.createMediaStreamSource(liveStream);
+      const muteGain = ctx.createGain();           // gated on pause (silence, keeps the stream primed)
+      muteGain.gain.value = networkCapturePaused ? 0 : 1;
       const delay = ctx.createDelay(SONOS_MAX_DELAY / 1000);
       delay.delayTime.value = sonosDelayMs / 1000;
       const zero = ctx.createGain();
@@ -1287,12 +1359,13 @@ async function buildSonosCapture() {
         console.warn('Sonos capture worklet unavailable, using ScriptProcessor:', err.message);
       }
 
-      src.connect(delay);
+      src.connect(muteGain);
+      muteGain.connect(delay);
       delay.connect(node);
       node.connect(zero);
       zero.connect(ctx.destination);
       await ctx.resume();
-      sonosCapture = { ctx, src, delay, node, zero };
+      sonosCapture = { ctx, src, muteGain, delay, node, zero };
       return sonosCapture;
     } catch (err) {
       if (ctx) ctx.close().catch(() => {});
@@ -1311,6 +1384,7 @@ function teardownSonosCapture() {
     if (sonosCapture.node.port) sonosCapture.node.port.onmessage = null;
     if ('onaudioprocess' in sonosCapture.node) sonosCapture.node.onaudioprocess = null;
     sonosCapture.src.disconnect();
+    sonosCapture.muteGain.disconnect();
     sonosCapture.delay.disconnect();
     sonosCapture.node.disconnect();
     sonosCapture.zero.disconnect();
@@ -1325,7 +1399,12 @@ function teardownSonosCapture() {
  * across changes (no gap), rooms dropped from the selection are ungrouped, and
  * the rest are (re)grouped under a stable coordinator.
  */
-async function refreshSonosStream() {
+let sonosRefreshChain = Promise.resolve();
+function refreshSonosStream() {
+  // Serialize: rapid check/uncheck must not interleave and race `sonosActive`.
+  return (sonosRefreshChain = sonosRefreshChain.then(runRefreshSonosStream, runRefreshSonosStream));
+}
+async function runRefreshSonosStream() {
   if (mode !== 'live' || !isPlaying || !liveStream) return;
   const rooms = selectedSonosRooms();
   if (!rooms.length) { await stopSonosStream(); return; }
@@ -1473,6 +1552,7 @@ function renderSonosRow(room) {
 async function onToggleSonos(room, cb, li) {
   if (cb.checked) sonosEnabled.add(room.id);
   else sonosEnabled.delete(room.id);
+  persistSonosSel(); // remember selected rooms across sessions
   li.classList.toggle('active', cb.checked);
 
   // Re-form the Sonos group if we're already broadcasting live.
@@ -1492,8 +1572,17 @@ el.btnFindSonos.addEventListener('click', findSonos);
 // capture format (16-bit/44.1 kHz/stereo), fed over its own IPC channel.
 /** @type {Array<{id:string, name:string, host:string, port:number, txt:string[], airplay2:boolean, model:string, volume?:number}>} */
 let airplayDevices = [];
-/** @type {Set<string>} enabled device ids */
-const airplayEnabled = new Set();
+/** @type {Set<string>} enabled device ids (restored from last session) */
+const AIRPLAY_SEL_KEY = 'serializer.airplaySelected.v1';
+const airplayEnabled = new Set(loadIdSet(AIRPLAY_SEL_KEY));
+function persistAirplaySel() { try { localStorage.setItem(AIRPLAY_SEL_KEY, JSON.stringify([...airplayEnabled])); } catch {} }
+// Per-receiver volume (AirPlay devices don't pass through our Web Audio gain, so
+// volume lives on the device — remember it per id across sessions).
+const AIRPLAY_VOL_KEY = 'serializer.airplayVol.v1';
+const airplayVols = (() => { try { return JSON.parse(localStorage.getItem(AIRPLAY_VOL_KEY)) || {}; } catch { return {}; } })();
+const persistAirplayVols = debounce(() => {
+  try { localStorage.setItem(AIRPLAY_VOL_KEY, JSON.stringify(airplayVols)); } catch {}
+}, 400);
 /** @type {?{ctx: AudioContext, src: MediaStreamAudioSourceNode, delay: DelayNode, node: AudioNode, zero: GainNode}} */
 let airplayCapture = null;
 /** @type {?Promise<any>} guards concurrent (async) capture builds */
@@ -1544,6 +1633,8 @@ async function buildAirPlayCapture() {
     try {
       ctx = new AudioContext({ sampleRate: 44100 });
       const src = ctx.createMediaStreamSource(liveStream);
+      const muteGain = ctx.createGain();           // gated on pause (silence, keeps the stream primed)
+      muteGain.gain.value = networkCapturePaused ? 0 : 1;
       const delay = ctx.createDelay(AIRPLAY_MAX_DELAY / 1000);
       delay.delayTime.value = airplayDelayMs / 1000;
       const zero = ctx.createGain();
@@ -1572,12 +1663,13 @@ async function buildAirPlayCapture() {
         console.warn('AirPlay capture worklet unavailable, using ScriptProcessor:', err.message);
       }
 
-      src.connect(delay);
+      src.connect(muteGain);
+      muteGain.connect(delay);
       delay.connect(node);
       node.connect(zero);
       zero.connect(ctx.destination);
       await ctx.resume();
-      airplayCapture = { ctx, src, delay, node, zero };
+      airplayCapture = { ctx, src, muteGain, delay, node, zero };
       return airplayCapture;
     } catch (err) {
       if (ctx) ctx.close().catch(() => {});
@@ -1596,6 +1688,7 @@ function teardownAirPlayCapture() {
     if (airplayCapture.node.port) airplayCapture.node.port.onmessage = null;
     if ('onaudioprocess' in airplayCapture.node) airplayCapture.node.onaudioprocess = null;
     airplayCapture.src.disconnect();
+    airplayCapture.muteGain.disconnect();
     airplayCapture.delay.disconnect();
     airplayCapture.node.disconnect();
     airplayCapture.zero.disconnect();
@@ -1606,7 +1699,12 @@ function teardownAirPlayCapture() {
 }
 
 /** Re-sync the AirPlay set to the current selection (capture keeps running). */
-async function refreshAirPlayStream() {
+let airplayRefreshChain = Promise.resolve();
+function refreshAirPlayStream() {
+  // Serialize: rapid check/uncheck must not interleave and race `airplayActive`.
+  return (airplayRefreshChain = airplayRefreshChain.then(runRefreshAirPlayStream, runRefreshAirPlayStream));
+}
+async function runRefreshAirPlayStream() {
   if (mode !== 'live' || !isPlaying || !liveStream) return;
   const devices = selectedAirPlay();
   if (!devices.length) { await stopAirPlayStream(); return; }
@@ -1742,8 +1840,11 @@ function renderAirPlayRow(dev) {
   // the device over the protocol.
   const sliders = document.createElement('div');
   sliders.className = 'dev-sliders';
+  dev.volume = airplayVols[dev.id] ?? dev.volume ?? 50; // restore saved level
   const pushVol = throttle((v) => window.api.airplaySetVolume(dev.id, v), 120);
-  sliders.appendChild(sliderGroup('Volume', 0, 100, dev.volume ?? 50, '%', (v) => { dev.volume = v; pushVol(v); }));
+  sliders.appendChild(sliderGroup('Volume', 0, 100, dev.volume, '%', (v) => {
+    dev.volume = v; airplayVols[dev.id] = v; persistAirplayVols(); pushVol(v);
+  }));
   main.appendChild(sliders);
 
   li.appendChild(enableWrap);
@@ -1754,6 +1855,7 @@ function renderAirPlayRow(dev) {
 async function onToggleAirPlay(dev, cb, li) {
   if (cb.checked) airplayEnabled.add(dev.id);
   else airplayEnabled.delete(dev.id);
+  persistAirplaySel(); // remember selected receivers across sessions
   li.classList.toggle('active', cb.checked);
 
   if (mode === 'live' && isPlaying) {
@@ -1852,3 +1954,223 @@ scanDevices();
 findSonos();
 findAirPlay();
 paintAllRanges();
+
+// ---- Dashboard: draggable / resizable, add-or-remove panels ----------------
+(() => {
+  const PANELS = [
+    { id: 'transport', name: 'Master · Transport', tag: '', w: 7, h: 11 },
+    { id: 'devices', name: 'Output Bus', tag: '', w: 5, h: 11 },
+    { id: 'sonos', name: 'Sonos', tag: 'network', w: 6, h: 8 },
+    { id: 'airplay', name: 'AirPlay', tag: 'network', w: 6, h: 8 },
+  ];
+  const DEFAULT_LAYOUT = [
+    { i: 'transport', x: 0, y: 0, w: 7, h: 11 },
+    { i: 'devices', x: 7, y: 0, w: 5, h: 11 },
+  ];
+  const LAYOUT_KEY = 'serializer.layout.v1';
+  const ROW = 26;     // px per grid row
+  const MARGIN = 12;  // px gap between cells
+
+  const gridEl = document.getElementById('grid');
+  const widgets = {};
+  for (const p of PANELS) widgets[p.id] = document.getElementById('w-' + p.id);
+  const sizeOf = Object.fromEntries(PANELS.map((p) => [p.id, { w: p.w, h: p.h }]));
+
+  let layout = loadLayout();
+
+  function loadLayout() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(LAYOUT_KEY));
+      if (Array.isArray(saved) && saved.length) {
+        const clean = saved.filter((it) => widgets[it.i]).map((it) => {
+          // Clamp to the grid so a stale/edited layout can't place a panel off-screen.
+          const w = Math.max(1, Math.min(it.w | 0, COLS));
+          const x = Math.max(0, Math.min(it.x | 0, COLS - w));
+          return { i: it.i, x, y: Math.max(0, it.y | 0), w, h: Math.max(1, it.h | 0) };
+        });
+        if (clean.length) return clean;
+      }
+    } catch {}
+    return DEFAULT_LAYOUT.map((it) => ({ ...it }));
+  }
+  function saveLayout() { try { localStorage.setItem(LAYOUT_KEY, JSON.stringify(layout)); } catch {} }
+  const getItem = (id) => layout.find((it) => it.i === id);
+
+  function colWidth() { return (gridEl.clientWidth - MARGIN * (COLS + 1)) / COLS; }
+  function cellToPx(item, cw = colWidth()) {
+    return {
+      left: Math.round(MARGIN + item.x * (cw + MARGIN)),
+      top: Math.round(MARGIN + item.y * (ROW + MARGIN)),
+      width: Math.round(item.w * cw + (item.w - 1) * MARGIN),
+      height: Math.round(item.h * ROW + (item.h - 1) * MARGIN),
+    };
+  }
+
+  const placeholder = document.createElement('div');
+  placeholder.className = 'grid-placeholder';
+  gridEl.appendChild(placeholder);
+
+  function paintPlaceholder(id) {
+    const b = cellToPx(getItem(id));
+    placeholder.style.transform = `translate(${b.left}px, ${b.top}px)`;
+    placeholder.style.width = b.width + 'px';
+    placeholder.style.height = b.height + 'px';
+  }
+
+  function renderLayout(skipId) {
+    const shown = new Set(layout.map((it) => it.i));
+    for (const p of PANELS) if (!shown.has(p.id)) widgets[p.id].hidden = true;
+    const cw = colWidth();
+    for (const item of layout) {
+      const el = widgets[item.i];
+      el.hidden = false;
+      if (item.i === skipId) continue;
+      const b = cellToPx(item, cw);
+      el.style.transform = `translate(${b.left}px, ${b.top}px)`;
+      el.style.width = b.width + 'px';
+      el.style.height = b.height + 'px';
+    }
+    gridEl.style.height = (MARGIN + bottom(layout) * (ROW + MARGIN) + MARGIN) + 'px';
+  }
+
+  function startDrag(e, id) {
+    const el = widgets[id];
+    const cw = colWidth();
+    const start = cellToPx(getItem(id), cw);
+    const sx = e.clientX; const sy = e.clientY;
+    el.classList.add('dragging');
+    gridEl.classList.add('is-dragging');
+    paintPlaceholder(id);
+    const maxLeft = Math.max(MARGIN, gridEl.clientWidth - start.width - MARGIN);
+    const onMove = (ev) => {
+      const left = Math.max(MARGIN, Math.min(maxLeft, start.left + (ev.clientX - sx)));
+      const top = Math.max(MARGIN, start.top + (ev.clientY - sy));
+      el.style.transform = `translate(${left}px, ${top}px)`;
+      const gx = Math.round((left - MARGIN) / (cw + MARGIN));
+      const gy = Math.round((top - MARGIN) / (ROW + MARGIN));
+      layout = moveElement(layout, id, gx, gy);
+      renderLayout(id);
+      paintPlaceholder(id);
+    };
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+      el.classList.remove('dragging');
+      gridEl.classList.remove('is-dragging');
+      renderLayout();
+      saveLayout();
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
+  }
+
+  function startResize(e, id) {
+    const el = widgets[id];
+    const cw = colWidth();
+    const start = cellToPx(getItem(id), cw);
+    const sx = e.clientX; const sy = e.clientY;
+    el.classList.add('resizing');
+    gridEl.classList.add('is-dragging');
+    paintPlaceholder(id);
+    const onMove = (ev) => {
+      const wpx = Math.max(120, start.width + (ev.clientX - sx));
+      const hpx = Math.max(110, start.height + (ev.clientY - sy));
+      el.style.width = wpx + 'px';
+      el.style.height = hpx + 'px';
+      const w = Math.round((wpx + MARGIN) / (cw + MARGIN));
+      const h = Math.round((hpx + MARGIN) / (ROW + MARGIN));
+      layout = resizeElement(layout, id, w, h);
+      renderLayout(id);
+      paintPlaceholder(id);
+    };
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+      el.classList.remove('resizing');
+      gridEl.classList.remove('is-dragging');
+      renderLayout();
+      saveLayout();
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
+  }
+
+  function showPanel(id) {
+    if (getItem(id)) return;
+    layout = addElement(layout, { i: id, x: 0, w: sizeOf[id].w, h: sizeOf[id].h });
+    renderLayout(); saveLayout(); renderModalList();
+    widgets[id].scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+  function hidePanel(id) {
+    layout = removeElement(layout, id);
+    widgets[id].hidden = true;
+    renderLayout(); saveLayout(); renderModalList();
+  }
+
+  // wire each widget's drag handle, resize grip and close button
+  for (const p of PANELS) {
+    const el = widgets[p.id];
+    el.querySelector('.w-bar').addEventListener('pointerdown', (e) => {
+      if (e.button !== 0 || e.target.closest('button, input, select, a, .info-icon, .w-close')) return;
+      e.preventDefault();
+      startDrag(e, p.id);
+    });
+    el.querySelector('.w-resize').addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      startResize(e, p.id);
+    });
+    el.querySelector('.w-close').addEventListener('click', () => hidePanel(p.id));
+  }
+
+  // ---- add-panel modal ----
+  const modal = document.getElementById('panelModal');
+  const modalList = document.getElementById('panelModalList');
+  function renderModalList() {
+    const shown = new Set(layout.map((it) => it.i));
+    modalList.innerHTML = '';
+    for (const p of PANELS) {
+      const li = document.createElement('li');
+      li.className = 'modal-row';
+      const name = document.createElement('span');
+      name.className = 'mr-name';
+      name.textContent = p.name;
+      li.appendChild(name);
+      if (p.tag) {
+        const tag = document.createElement('span');
+        tag.className = 'mr-tag';
+        tag.textContent = p.tag;
+        li.appendChild(tag);
+      }
+      const on = shown.has(p.id);
+      const btn = document.createElement('button');
+      btn.className = 'key key-ghost mr-toggle' + (on ? ' on' : '');
+      btn.textContent = on ? 'Hide' : 'Add';
+      btn.addEventListener('click', () => (on ? hidePanel(p.id) : showPanel(p.id)));
+      li.appendChild(btn);
+      modalList.appendChild(li);
+    }
+  }
+  const closeModal = () => { modal.hidden = true; };
+  document.getElementById('btnAddPanel').addEventListener('click', () => { renderModalList(); modal.hidden = false; });
+  document.getElementById('panelModalClose').addEventListener('click', closeModal);
+  modal.addEventListener('click', (e) => { if (e.target === modal) closeModal(); });
+  document.getElementById('btnResetLayout').addEventListener('click', () => {
+    layout = DEFAULT_LAYOUT.map((it) => ({ ...it }));
+    renderLayout(); saveLayout(); renderModalList(); closeModal();
+  });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !modal.hidden) closeModal(); });
+
+  let resizeRaf = 0;
+  window.addEventListener('resize', () => {
+    if (resizeRaf) return;
+    resizeRaf = requestAnimationFrame(() => { resizeRaf = 0; renderLayout(); });
+  });
+
+  renderLayout();
+  renderModalList();
+})();

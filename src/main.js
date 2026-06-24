@@ -22,6 +22,27 @@ airplayCaster.onStatus = (key, status, desc) => {
   }
 };
 
+// Only one instance may run — a second would start a rival stream server and
+// AirPlay caster fighting over the same Sonos rooms / AirPlay receivers (we hit
+// exactly this confusion in testing). Focus the existing window instead.
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) app.quit();
+app.on('second-instance', () => {
+  if (mainWindow) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.focus();
+  }
+});
+
+// Stop broadcasting to network devices so they don't keep playing once the UI is
+// gone. The local HTTP stream server stays up so reopening the window (macOS
+// dock) still works; on full quit it's torn down too.
+function stopStreamingToDevices() {
+  try { airplayCaster.stopAll(); } catch {}
+  try { if (sonosGroup.coordIp) sonos.stop(sonosGroup.coordIp).catch(() => {}); } catch {}
+  sonosGroup = { coordId: null, coordIp: null, followers: new Set() };
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1280,
@@ -39,6 +60,10 @@ function createWindow() {
   });
 
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+
+  // Closing the window (which does NOT quit on macOS) must stop any active
+  // Sonos/AirPlay broadcast — otherwise they keep playing with no UI to stop them.
+  mainWindow.on('close', stopStreamingToDevices);
 
   mainWindow.on('closed', () => {
     mainWindow = null;
@@ -174,7 +199,7 @@ ipcMain.handle('airplay:passcode', (_e, { key, passcode }) => { airplayCaster.se
 // the Sonos feed so either can run alone.
 ipcMain.on('airplay:pcm', (_e, buf) => airplayCaster.writePcm(Buffer.from(buf)));
 
-app.whenReady().then(async () => {
+if (gotSingleInstanceLock) app.whenReady().then(async () => {
   configureMediaPermissions();
   createWindow();
 
@@ -189,6 +214,12 @@ app.whenReady().then(async () => {
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
+});
+
+// On full quit, stop the broadcasts and tear down the stream server.
+app.on('before-quit', () => {
+  stopStreamingToDevices();
+  try { if (streamServer) { streamServer.stop(); streamServer = null; } } catch {}
 });
 
 app.on('window-all-closed', () => {

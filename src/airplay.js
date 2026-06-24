@@ -190,6 +190,9 @@ class AirPlayCaster {
       this._airtunes = new AirTunes();
       // Per-device status fan-out (keyed). The instance re-emits device events.
       this._airtunes.on('device', (key, status, desc) => {
+        // A receiver that stopped or errored is gone from the library's pool —
+        // drop it from ours too, or setVolume/writePcm target a dead device.
+        if (status === 'stopped' || status === 'error') this._devices.delete(key);
         if (this.onStatus) this.onStatus(key, status, desc || '');
       });
       this._airtunes.on('error', () => {}); // don't let a stream error crash main
@@ -257,11 +260,14 @@ class AirPlayCaster {
     }
   }
 
-  /** Stop everything and drop the shared stream. */
+  /**
+   * Stop everything and drop the shared stream. NB: node-airtunes2's own
+   * stopAll() is a no-op unless given a callback (it wraps its whole body in
+   * `if (cb != null)`), so we stop each device by key instead.
+   */
   stopAll() {
     if (!this._airtunes) { this._devices.clear(); return; }
-    try { this._airtunes.stopAll(); } catch {}
-    this._devices.clear();
+    this.stop([...this._devices.keys()]);
   }
 }
 

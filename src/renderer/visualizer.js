@@ -203,7 +203,10 @@ export class Visualizer {
   }
 
   resize() {
-    const dpr = Math.min(window.devicePixelRatio || 1, this.journey ? 1.5 : 2);
+    // Cap DPR on the heavy fullscreen paths (ride/journey) — at 2× on Retina a
+    // fullscreen ride does a full-canvas trail fill + gradient passes over ~4M+
+    // pixels/frame; 1.5× is visually indistinguishable here but far cheaper.
+    const dpr = Math.min(window.devicePixelRatio || 1, (this.journey || this.ride) ? 1.5 : 2);
     const w = this.canvas.clientWidth || window.innerWidth;
     const h = this.canvas.clientHeight || window.innerHeight;
     this.canvas.width = Math.max(1, Math.floor(w * dpr));
