@@ -272,9 +272,22 @@ class AirPlayCaster {
     return { ok: true, keys: [...this._devices.keys()] };
   }
 
-  /** Feed one chunk of 16-bit LE stereo PCM to all connected receivers. */
+  /**
+   * Feed one chunk of 16-bit LE stereo PCM to all connected receivers.
+   *
+   * node-airtunes2's circular buffer NEVER drops — write() always appends and just
+   * returns false when full. It is drained on a wall-clock timer (Date.now()), but
+   * we PRODUCE on the Mac audio-hardware clock (the capture AudioContext). Those two
+   * oscillators differ slightly, so if we run faster the buffer grows without bound
+   * and AirPlay falls progressively behind — drift no fixed delay can correct. Once
+   * the buffer is comfortably past its ~0.8s play threshold, drop this chunk to keep
+   * latency bounded (a rare brief glitch beats unbounded drift — same idea as the
+   * Sonos stream-server back-pressure).
+   */
   writePcm(buf) {
     if (!this._airtunes || this._devices.size === 0) return;
+    const cb = this._airtunes.circularBuffer;
+    if (cb && cb.maxSize && cb.currentSize > cb.maxSize * 0.6) return; // bound drift
     try { this._airtunes.write(buf); } catch { /* circular buffer closed mid-teardown */ }
   }
 
