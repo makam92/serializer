@@ -16,29 +16,28 @@
     </svg>
 
     <div class="scope">
-      <!-- Top letterbox = the slate -->
-      <header class="slate">
-        <div class="slate-l">
-          <svg class="reticle" viewBox="0 0 32 32" aria-hidden="true">
-            <circle cx="16" cy="16" r="9.5" fill="none" stroke="currentColor" stroke-width="1" />
-            <circle cx="16" cy="16" r="3.4" fill="none" stroke="currentColor" stroke-width="1" />
-            <path d="M16 1.5v6M16 24.5v6M1.5 16h6M24.5 16h6" stroke="currentColor" stroke-width="1" />
-          </svg>
-          <div class="brand-txt">
-            <span class="wordmark">Serializer</span>
-            <span class="slate-meta">ROLL 01 · 48 kHz · 24-BIT · STEREO</span>
-          </div>
+      <!-- Header / global bar -->
+      <header class="hdr">
+        <div class="hdr-grp hdr-l">
+          <span class="wordmark">SERIALIZER</span>
+          <span class="hdr-div"></span>
+          <span class="status-pill" id="statusPill">
+            <span class="status-dot" id="statusDot"></span>
+            <span class="status-word" id="transportStatus">STANDBY</span>
+          </span>
         </div>
-        <div class="slate-r">
-          <span class="tc" id="slateTc">00:00:00:00</span>
-          <span class="tally" id="tally" aria-hidden="true"></span>
-          <button id="btnAddPanel" class="key key-ghost btn-add" title="Add a panel">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14" /></svg>
-            Add panel
+        <div class="hdr-grp hdr-c">
+          <span class="timecode"><span id="timecode" data-session>0:00</span><span class="tc-total" id="timecodeTotal">/ 0:00</span></span>
+          <span class="hdr-div"></span>
+          <span class="wallclock" data-wallclock>--:--:--</span>
+          <span class="tally-wrap"><span class="tally-dot"></span><span class="tally" id="tally">0 ACTIVE</span></span>
+        </div>
+        <div class="hdr-grp hdr-r">
+          <button id="btnVisualize" class="hbtn hbtn-viz" title="Visualize">
+            <span class="eq" aria-hidden="true"><i></i><i></i><i></i></span>Visualize
           </button>
-          <button id="btnViz" class="key key-amber btn-viz">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.2" /><circle cx="12" cy="12" r="3.1" /><path d="M12 3.8v3M12 17.2v3M3.8 12h3M17.2 12h3" /></svg>
-            Visualize
+          <button id="btnAddPanel" class="hbtn hbtn-add" title="Add a panel">
+            <span class="plus" aria-hidden="true">+</span> Add panel
           </button>
         </div>
       </header>
@@ -54,57 +53,72 @@
               <span class="card-status" id="transportStatus">standby</span>
               <button class="w-close" data-close="transport" title="Hide panel" aria-label="Hide panel">✕</button>
             </header>
-            <div class="w-body">
-              <div class="source-row">
-                <div class="mode-toggle" role="tablist">
-                  <button id="btnModeFile" class="seg active">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h3.4l2 2H19a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /></svg>
-                    File
-                  </button>
-                  <button id="btnModeLive" class="seg">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3" /><path d="M5 11a7 7 0 0 0 14 0" /><line x1="12" y1="18" x2="12" y2="21" /><line x1="9" y1="21" x2="15" y2="21" /></svg>
-                    Live input
-                  </button>
+            <div class="w-body tp-body">
+              <!-- source segmented toggle -->
+              <div class="seg-toggle" role="tablist">
+                <button id="segFile" class="seg active">File</button>
+                <button id="segLive" class="seg"><span class="seg-dot" aria-hidden="true"></span>Live input</button>
+              </div>
+
+              <!-- FILE transport -->
+              <div id="fileTransport" class="tp-file">
+                <div class="np">
+                  <div class="np-art" aria-hidden="true"></div>
+                  <div class="np-meta">
+                    <div class="np-title" id="trackTitle">No signal — load source</div>
+                    <div class="np-sub" id="trackSubtitle">choose an audio file to begin</div>
+                    <div class="np-fmt" id="trackFormat"></div>
+                  </div>
                 </div>
-                <select id="inputSelect" class="input-select" hidden></select>
-              </div>
-
-              <div class="now-playing">
-                <div class="np-title" id="trackTitle">No signal — load source</div>
-                <div class="np-sub" id="trackSub">choose an audio file to begin</div>
-              </div>
-
-              <div class="input-meter" id="inputMeter" hidden>
-                <span class="meter-label">In</span>
-                <div class="meter-track">
-                  <div class="meter-fill" id="meterFill"></div>
-                </div>
-                <span class="meter-db" id="meterDb">–∞ dB</span>
-              </div>
-
-              <div class="seek-row">
-                <span class="time" id="timeCurrent">0:00</span>
-                <input type="range" id="seek" class="timeline" min="0" max="1000" value="0" step="1" disabled />
-                <span class="time" id="timeTotal">0:00</span>
-              </div>
-
-              <div class="controls">
-                <button id="btnPick" class="key">Open file…</button>
-                <div class="transport-buttons">
-                  <button id="btnPlay" class="key key-play" disabled>▶ Play</button>
-                  <button id="btnStop" class="key key-stop" disabled>■ Stop</button>
-                </div>
-                <div class="master-vol">
-                  <label for="masterVol">Master</label>
-                  <input type="range" id="masterVol" min="0" max="100" value="100" />
+                <div class="seek-wrap">
+                  <input type="range" id="seek" class="seekbar" min="0" max="1000" value="0" step="1" disabled />
+                  <div class="seek-times"><span id="timeCurrent">0:00</span><span id="timeTotal">0:00</span></div>
                 </div>
               </div>
 
-              <p class="live-hint" id="liveHint" hidden>
-                To broadcast your <strong>browser / system audio</strong>: install the free
-                <strong>BlackHole</strong> driver, set your Mac's output to it (or a Multi-Output
-                Device so you still hear it), then pick <strong>BlackHole</strong> as the input above.
-              </p>
+              <!-- LIVE transport -->
+              <div id="liveTransport" class="tp-live" hidden>
+                <label class="input-field">
+                  <span class="if-label">INPUT DEVICE</span>
+                  <select id="inputDevice" class="input-select"></select>
+                </label>
+                <div class="input-meter" id="inputMeter">
+                  <div class="im-head"><span class="im-label">INPUT LEVEL</span><span class="im-db"><span id="meterDb">–∞</span> <span class="db-unit">dB</span></span></div>
+                  <div class="im-track"><div class="im-fill" id="meterFill"></div></div>
+                </div>
+                <p class="live-hint" id="liveHint">
+                  To broadcast your <strong>browser / system audio</strong>: install the free
+                  <strong>BlackHole</strong> driver, set your Mac's output to it (or a Multi-Output
+                  Device so you still hear it), then pick <strong>BlackHole</strong> as the input above.
+                </p>
+              </div>
+
+              <!-- shared transport controls -->
+              <div class="tp-buttons" id="tpButtons">
+                <button id="btnOpen" class="tp-open"><span class="ico-folder" aria-hidden="true"></span>Open file</button>
+                <button id="btnPlay" class="tp-play" title="Play / Pause" disabled aria-label="Play / Pause"></button>
+                <button id="btnStop" class="tp-stop" title="Stop" disabled aria-label="Stop"></button>
+                <div class="tp-status" id="tpStatus">
+                  <div class="tps-title" id="tpsTitle">Live input</div>
+                  <div class="tps-sub" id="tpsSub">press Start to broadcast</div>
+                </div>
+              </div>
+
+              <div class="tp-divider"></div>
+
+              <!-- master fader -->
+              <div class="master">
+                <div class="master-head"><span class="master-label">MASTER</span><span class="master-db"><span id="masterDb">0</span> <span class="db-unit">dB</span></span></div>
+                <input type="range" id="masterVol" class="fader" min="0" max="100" value="100" />
+              </div>
+
+              <!-- output VU -->
+              <div class="vu">
+                <div class="vu-head"><span class="vu-label">OUTPUT · VU</span><span class="vu-peak" id="vuPeak"></span></div>
+                <div class="vu-row"><span class="vu-ch">L</span><div class="vu-track"><div class="vu-fill" id="vuL"></div></div></div>
+                <div class="vu-row"><span class="vu-ch">R</span><div class="vu-track"><div class="vu-fill" id="vuR"></div></div></div>
+                <div class="vu-scale"><span>-40</span><span>-20</span><span>-12</span><span>-6</span><span class="zero">0</span></div>
+              </div>
             </div>
             <span class="w-resize" aria-hidden="true"></span>
           </section>
@@ -114,20 +128,21 @@
             <header class="w-bar">
               <span class="w-grip" aria-hidden="true"></span>
               <h2 class="card-title">Output Bus</h2>
+              <span class="head-meta" id="devicesMeta"></span>
+              <span class="discovering" id="devicesDiscover" hidden><span class="spinner" aria-hidden="true"></span>discovering…</span>
+              <span class="head-spacer"></span>
               <div class="head-actions">
-                <span class="info-wrap">
-                  <button id="btnAutoSync" class="key key-ghost">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5" /><path d="M12 7.5v4.5l3 1.5" /></svg>
-                    Auto-sync
-                  </button>
-                  <span class="info-icon" tabindex="0" aria-label="How Auto-sync works">i
+                <span class="sync-pill">
+                  <button id="btnAutoSync" class="sync-btn"><span class="sync-dot" aria-hidden="true"></span>Auto-sync</button>
+                  <span class="sync-info" tabindex="0" aria-label="How Auto-sync works">i
                     <span class="info-tip">
                       <strong>Auto-sync</strong> measures each speaker for you. It plays a short
-                      test chirp on every ticked speaker — local ones <em>and</em> your ticked
-                      <strong>Sonos</strong> rooms — one at a time, and listens with your Mac’s
-                      <strong>microphone</strong> to time how long each takes to be heard. It then
-                      delays every speaker to match the slowest (usually Sonos): locals via their
-                      <strong>Delay comp</strong>, Sonos via the <strong>group delay</strong>.
+                      test chirp on every ticked speaker — local ones, your ticked
+                      <strong>Sonos</strong> rooms <em>and</em> <strong>AirPlay</strong> receivers —
+                      one at a time, and listens with your Mac’s <strong>microphone</strong> to time
+                      how long each takes to be heard. It then delays every speaker to match the
+                      slowest (often Sonos or an AirPlay TV): locals via their
+                      <strong>Delay comp</strong>, Sonos &amp; AirPlay via their <strong>group delay</strong>.
                       <br /><br />
                       Tips: put the mic near your listening spot, keep the room quiet, and use the
                       built-in mic (not BlackHole). Sonos takes a few extra seconds to measure. You
@@ -135,14 +150,8 @@
                     </span>
                   </span>
                 </span>
-                <button id="btnAutoSyncUndo" class="key key-ghost">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 7L4 12l5 5" /><path d="M4 12h11a5 5 0 0 1 0 10h-1" /></svg>
-                  Reset
-                </button>
-                <button id="btnRescan" class="key key-ghost">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2.3 5.7" /><path d="M20 5v6h-6" /></svg>
-                  Rescan
-                </button>
+                <button id="btnAutoSyncUndo" class="tbtn">Reset</button>
+                <button id="btnRescan" class="tbtn">Rescan</button>
               </div>
               <button class="w-close" data-close="devices" title="Hide panel" aria-label="Hide panel">✕</button>
             </header>
@@ -158,6 +167,8 @@
             <header class="w-bar">
               <span class="w-grip" aria-hidden="true"></span>
               <h2 class="card-title">Sonos <span class="net-tag">network</span></h2>
+              <span class="discovering" id="sonosDiscover" hidden><span class="spinner" aria-hidden="true"></span>discovering…</span>
+              <span class="head-spacer"></span>
               <button id="btnFindSonos" class="key key-ghost">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2.3 5.7" /><path d="M20 5v6h-6" /></svg>
                 Find
@@ -166,15 +177,18 @@
             </header>
             <div class="w-body">
               <p class="hint" id="sonosHint">Searching your network for Sonos rooms…</p>
-              <p class="hint warn" id="sonosWarn" hidden>
-                ⚠ Hearing an <strong>echo / reverb</strong> on Sonos? Sonos plays ~1–2&nbsp;s behind
-                your Mac. If your real speakers are part of your BlackHole <strong>Multi-Output
-                Device</strong>, you’re hearing both the instant local sound and the delayed Sonos
-                sound at once. To hear it cleanly on Sonos, set the Mac’s output to <strong>BlackHole
-                alone</strong> (not the Multi-Output), or move out of earshot of the local speakers.
-              </p>
-              <div class="sonos-controls" id="sonosControls" hidden></div>
+              <div class="echo-banner" id="sonosWarn" hidden>
+                <span class="echo-icon" aria-hidden="true">!</span>
+                <div class="echo-body">
+                  <div class="echo-text">Local output is on while monitoring Sonos — you may hear
+                    echo or reverb. Sonos plays ~1–2&nbsp;s behind your Mac, so you’re hearing the
+                    instant local sound and the delayed Sonos sound at once.</div>
+                  <button class="echo-mute" id="btnMuteLocal">Mute local output</button>
+                </div>
+                <button class="echo-dismiss" id="btnEchoDismiss" title="Dismiss" aria-label="Dismiss">✕</button>
+              </div>
               <ul class="device-list" id="sonosList"></ul>
+              <div class="sonos-controls" id="sonosControls" hidden></div>
             </div>
             <span class="w-resize" aria-hidden="true"></span>
           </section>
@@ -184,6 +198,8 @@
             <header class="w-bar">
               <span class="w-grip" aria-hidden="true"></span>
               <h2 class="card-title">AirPlay <span class="net-tag">network</span></h2>
+              <span class="discovering" id="airplayDiscover" hidden><span class="spinner" aria-hidden="true"></span>discovering…</span>
+              <span class="head-spacer"></span>
               <button id="btnFindAirPlay" class="key key-ghost">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2.3 5.7" /><path d="M20 5v6h-6" /></svg>
                 Find
@@ -192,8 +208,8 @@
             </header>
             <div class="w-body">
               <p class="hint" id="airplayHint">Searching your network for AirPlay devices…</p>
-              <div class="sonos-controls" id="airplayControls" hidden></div>
               <ul class="device-list" id="airplayList"></ul>
+              <div class="sonos-controls" id="airplayControls" hidden></div>
             </div>
             <span class="w-resize" aria-hidden="true"></span>
           </section>
@@ -201,8 +217,13 @@
         </div>
       </main>
 
-      <!-- Bottom letterbox = telemetry rail -->
-      <footer class="rail status" id="status">Ready.</footer>
+      <!-- Status bar -->
+      <footer class="statusbar">
+        <span class="sb-dot"></span>
+        <span class="sb-text" id="statusText">Ready.</span>
+        <span class="sb-spacer"></span>
+        <span class="sb-sys" id="statusSys">CoreAudio</span>
+      </footer>
     </div>
 
     <!-- corner registration crops -->

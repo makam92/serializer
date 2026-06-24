@@ -2071,7 +2071,8 @@ function handleAirPlayStatus({ key, status, desc }) {
       setStatus(`AirPlay: enter the code shown on “${name}”.`);
       break;
     case 'pair_failed':
-      setStatus(`AirPlay pairing failed for “${name}”. Re-tick it to try again.`);
+      clearAirPlayPasscode(key); // tear down the (now dead) PIN prompt; re-tick restarts pairing
+      setStatus(`AirPlay pairing failed for “${name}” — wrong code? Re-tick it to try again.`);
       break;
     case 'pair_success':
     case 'ready':

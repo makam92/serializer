@@ -164,6 +164,43 @@ async function discover() {
 // ---------------------------------------------------------------------------
 // Public: streaming (lazy node-airtunes2)
 // ---------------------------------------------------------------------------
+
+/**
+ * node-airtunes2 crashes the whole process (uncaught) when a HomeKit/AirPlay PIN
+ * is rejected: in PAIR_SETUP_2 it reads the server's "Proof" TLV — which is absent
+ * on a bad PIN (the device sends an error TLV instead) — and calls
+ * `srp.checkM2(undefined)`, throwing "Cannot read properties of undefined
+ * (reading 'toString')" synchronously inside the socket data handler. The library
+ * handles this correctly in PAIR_SETUP_1 (emits `pair_failed`) but not _2.
+ *
+ * Wrap `Client.prototype.processData` once so any handshake parse error surfaces as
+ * a clean `pair_failed` (which the UI already handles) instead of taking down main.
+ */
+let _pairingCrashPatched = false;
+function patchPairingCrash() {
+  if (_pairingCrashPatched) return;
+  try {
+    const path = require('path');
+    const rtsp = require(path.join(path.dirname(require.resolve('node-airtunes2')), 'rtsp.js'));
+    const Client = rtsp && rtsp.Client;
+    if (Client && Client.prototype && typeof Client.prototype.processData === 'function') {
+      const orig = Client.prototype.processData;
+      Client.prototype.processData = function (blob, rawData) {
+        try {
+          return orig.call(this, blob, rawData);
+        } catch (err) {
+          console.warn('[airplay] handshake error (likely a rejected PIN):', err && err.message);
+          try { this.emit('pair_failed'); } catch {}
+          try { this.cleanup('pair_failed'); } catch {}
+        }
+      };
+    }
+    _pairingCrashPatched = true;
+  } catch {
+    // best-effort: if the library layout changes, fall back to unpatched
+  }
+}
+
 /**
  * Wraps a single shared node-airtunes2 instance. All selected receivers share
  * one PCM stream so they stay sample-synchronised, just like a Sonos group.
@@ -187,6 +224,7 @@ class AirPlayCaster {
     if (this._loadError) return null;
     try {
       const AirTunes = require('node-airtunes2');
+      patchPairingCrash();
       this._airtunes = new AirTunes();
       // Per-device status fan-out (keyed). The instance re-emits device events.
       this._airtunes.on('device', (key, status, desc) => {
