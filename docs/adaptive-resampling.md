@@ -48,6 +48,26 @@ consumption, the offset you dialed in stays put — no drops, no growing lag.
   (`err>0`) → `ratio>1` → emit fewer frames → buffer falls back to target. Output clamped to
   `1 ± maxAdjust`, with anti-windup. Start **P-only** (`ki=0`); add a small `ki` once stable.
 
+## Measured drift (capture 1 — AirPlay, "The Frame", 10.7 min)
+
+First instrumentation pass (the temporary logger in `AirPlayCaster`):
+
+- **Direction: under-production.** The circular buffer *drained* steadily (−0.46 ms of
+  buffer per second), i.e. our capture clock runs slightly *slower* than the receiver's
+  wall-clock drain. (Not the over-production the drop-bound guards against.)
+- **Magnitude: ~460–530 ppm** ≈ 28 ms/min ≈ 0.8 s over 30 min.
+- **0 drops** all session, but the buffer fell from ~0.8 s to 0.23 s with 19 near-underrun
+  (<0.15 s) samples — heading for underrun → silence-pad + ~0.8 s re-buffer (the audible
+  "resync"). **This, not buffer growth, is the real-world symptom.**
+- Per-second `drift` is jitter-dominated (±3000 f/s, mean ~0); only the **fill-level trend**
+  is meaningful. The controller MUST smooth over ~10–30 s, not react per sample.
+
+Implications for the loop: target a fill of **~0.8 s** (the library's play threshold) for
+margin against the jitter-driven near-underruns; correction needed is tiny (~500 ppm, vs the
+±4000 ppm `maxAdjust` ceiling); the loop must **speed production up** here, but must handle
+both directions (the drift wasn't perfectly constant — stable for ~5 min then declined). Keep
+the drop-bound as a top-side backstop only.
+
 ## Integration
 
 ### AirPlay (do this first — clean feedback)
