@@ -216,6 +216,15 @@ class AirPlayCaster {
     /** @type {Map<string, {device:any, name:string}>} keyed by `host:port` */
     this._devices = new Map();
     this.onStatus = null;      // (key, status, desc) => void
+
+    // Drift instrumentation (temporary): measure produced-vs-consumed + buffer fill
+    // while streaming, to size the adaptive-resampler control loop. See
+    // docs/adaptive-resampling.md.
+    this._bytesWritten = 0;
+    this._bytesDropped = 0;
+    this._logTimer = null;
+    this._logStart = 0;
+    this._logPrev = null;
   }
 
   /** Lazily construct the AirTunes instance. Returns null if the module can't load. */
@@ -269,6 +278,7 @@ class AirPlayCaster {
       });
       this._devices.set(key, { device, name: r.name });
     }
+    if (this._devices.size > 0) this._startDriftLog();
     return { ok: true, keys: [...this._devices.keys()] };
   }
 
@@ -287,7 +297,8 @@ class AirPlayCaster {
   writePcm(buf) {
     if (!this._airtunes || this._devices.size === 0) return;
     const cb = this._airtunes.circularBuffer;
-    if (cb && cb.maxSize && cb.currentSize > cb.maxSize * 0.6) return; // bound drift
+    if (cb && cb.maxSize && cb.currentSize > cb.maxSize * 0.6) { this._bytesDropped += buf.length; return; } // bound drift
+    this._bytesWritten += buf.length;
     try { this._airtunes.write(buf); } catch { /* circular buffer closed mid-teardown */ }
   }
 
@@ -309,6 +320,7 @@ class AirPlayCaster {
       try { this._airtunes.stop(key); } catch {}
       this._devices.delete(key);
     }
+    if (this._devices.size === 0) this._stopDriftLog();
   }
 
   /**
@@ -317,8 +329,60 @@ class AirPlayCaster {
    * `if (cb != null)`), so we stop each device by key instead.
    */
   stopAll() {
-    if (!this._airtunes) { this._devices.clear(); return; }
+    if (!this._airtunes) { this._devices.clear(); this._stopDriftLog(); return; }
     this.stop([...this._devices.keys()]);
+  }
+
+  // ---- Drift instrumentation (temporary; remove once the resampler is tuned) ----
+  _startDriftLog() {
+    if (this._logTimer) return;
+    this._bytesWritten = 0;
+    this._bytesDropped = 0;
+    this._logStart = Date.now();
+    this._logPrev = { t: this._logStart, written: 0, dropped: 0, fill: 0 };
+    console.log('[airplay-drift] logging started — fill level + produced/consumed/drift, ~1/s');
+    this._logTimer = setInterval(() => this._driftTick(), 1000);
+    if (this._logTimer.unref) this._logTimer.unref();
+  }
+
+  _stopDriftLog() {
+    if (!this._logTimer) return;
+    clearInterval(this._logTimer);
+    this._logTimer = null;
+    console.log('[airplay-drift] logging stopped');
+  }
+
+  /**
+   * Once per second: fill level (a proxy for accumulated drift) plus the
+   * production vs. consumption rates. `drift` = frames/s we over/under-produce
+   * relative to the receiver's wall-clock drain — that, in ppm, is exactly the
+   * rate the adaptive resampler must trim. (Over-production shows up as dropped
+   * frames once the 0.6 buffer bound kicks in, plus any buffer growth.)
+   */
+  _driftTick() {
+    const cb = this._airtunes && this._airtunes.circularBuffer;
+    if (!cb || !cb.maxSize || !this._logPrev) return;
+    const now = Date.now();
+    const p = this._logPrev;
+    const dt = (now - p.t) / 1000;
+    if (dt <= 0) return;
+    const FR = 4; // bytes per stereo 16-bit frame
+    const fill = cb.currentSize / FR;                 // frames buffered now
+    const maxF = cb.maxSize / FR;
+    const wF = (this._bytesWritten - p.written) / FR; // frames written to the buffer this interval
+    const dF = (this._bytesDropped - p.dropped) / FR; // frames dropped by the bound this interval
+    const prod = wF + dF;                             // frames produced from capture
+    const consumed = wF - (fill - p.fill);            // frames the receiver drained
+    const drift = prod - consumed;                    // >0 = we run fast
+    const ips = (x) => Math.round(x / dt);            // -> per second
+    const ppm = Math.round((drift / dt) / 44100 * 1e6);
+    const tSec = Math.round((now - this._logStart) / 1000);
+    console.log(
+      `[airplay-drift] t=+${tSec}s fill=${(fill / 44100).toFixed(2)}s(${Math.round((fill / maxF) * 100)}%) ` +
+      `prod=${ips(prod)}f/s cons=${ips(consumed)}f/s drift=${drift >= 0 ? '+' : ''}${ips(drift)}f/s ` +
+      `(${ppm >= 0 ? '+' : ''}${ppm}ppm) [wrote ${ips(wF)} dropped ${ips(dF)}]`,
+    );
+    this._logPrev = { t: now, written: this._bytesWritten, dropped: this._bytesDropped, fill };
   }
 }
 
