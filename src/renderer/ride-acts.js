@@ -104,6 +104,22 @@ export const RIDE_ACTS = [
       ctx.fillStyle = 'rgba(18,7,24,0.92)';
       for (let b = 0; b < 6; b++) { const by = sy + sunR * 0.08 + b * sunR * 0.16; ctx.fillRect(hx - sunR, by, sunR * 2, sunR * 0.06 * (0.6 + b)); }
       ctx.restore();
+      // ---- a hawk gliding across the sky (dark silhouette; wings flap on the beat) ----
+      ctx.globalCompositeOperation = 'source-over';
+      {
+        const span = Math.min(W, H) * 0.045;                                 // half-wingspan
+        const period = W + span * 8;
+        const bx = ((R.t * 1.3 + 160) % period) - span * 4;                  // drifts left → right, loops
+        const by = hy - H * 0.26 + Math.sin(R.t * 0.011 + 1.3) * H * 0.045;  // soaring, gentle bob
+        const rise = span * (0.2 + 0.35 * Math.sin(R.t * 0.08) + R.kick * 0.5); // wing flap (snaps on kicks)
+        ctx.strokeStyle = `rgba(12,7,16,${(0.9 * A).toFixed(3)})`;
+        ctx.lineWidth = Math.max(1.5, span * 0.15); ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+        ctx.beginPath();
+        ctx.moveTo(bx - span, by - rise);
+        ctx.quadraticCurveTo(bx - span * 0.4, by + span * 0.12, bx, by);     // left wing into body
+        ctx.quadraticCurveTo(bx + span * 0.4, by + span * 0.12, bx + span, by - rise); // body into right wing
+        ctx.stroke();
+      }
       // dark ground plane — AFTER the sun so it occludes everything below the horizon
       ctx.fillStyle = `rgba(7,4,12,${A})`; ctx.fillRect(-W, hy, W * 3, H * 2);
       // rolling hills — OPAQUE silhouettes so they clearly sit IN FRONT of the sun (they were
