@@ -298,6 +298,73 @@ export const RIDE_ACTS = [
         ctx.fillStyle = 'rgba(255,242,210,' + (fa * 0.6).toFixed(3) + ')';
         ctx.beginPath(); ctx.arc(fx, fy, frad * 0.5, 0, 6.2832); ctx.fill();
       }
+      // ---- psychedelic forest elves: glowing pixies dancing among the trees ----
+      ctx.globalCompositeOperation = 'lighter';
+      var NE = 5;
+      for (var ei = 0; ei < NE; ei++) {
+        var h1 = fr(Math.sin(ei * 33.71) * 7219.31);
+        var h2 = fr(Math.sin(ei * 91.17) * 3415.92);
+        var depth = 0.45 + h2 * 0.55;                                   // far(small) → near(big)
+        var sc = Math.min(W, H) * (0.055 + depth * 0.085);              // elf height
+        var ex = cx + (h1 - 0.5) * W * 0.84 + Math.sin(t * (0.011 + h1 * 0.009) + ei * 2.1) * W * 0.05; // sway
+        var ey = H * (0.38 + h2 * 0.34) + Math.sin(t * (0.018 + h2 * 0.012) + ei) * H * 0.035;          // float + bob
+        var hue = (t * 0.7 + ei * 67 + treble * 90) % 360;             // psychedelic hue cycle
+        var pulse = 1 + k * 0.25 + bass * 0.12;
+        var hueB = (hue + 180) % 360, hueE = (hue + 50) % 360, hueA = (hue + 20) % 360;
+        // aura halo
+        var auraR = sc * (1.7 + k * 0.4);
+        var aA = 0.10 + k * 0.06 + bass * 0.04; if (aA > 0.22) aA = 0.22;
+        var ag = ctx.createRadialGradient(ex, ey, 0, ex, ey, auraR);
+        ag.addColorStop(0, 'hsla(' + hue.toFixed(0) + ',95%,68%,' + aA.toFixed(3) + ')');
+        ag.addColorStop(0.45, 'hsla(' + ((hue + 60) % 360).toFixed(0) + ',90%,60%,' + (aA * 0.45).toFixed(3) + ')');
+        ag.addColorStop(1, 'hsla(' + hue.toFixed(0) + ',90%,55%,0)');
+        ctx.fillStyle = ag; ctx.beginPath(); ctx.arc(ex, ey, auraR, 0, 6.2832); ctx.fill();
+        // flowing robe (bell)
+        ctx.fillStyle = 'hsla(' + hue.toFixed(0) + ',90%,56%,' + (0.40 * pulse).toFixed(3) + ')';
+        ctx.beginPath();
+        ctx.moveTo(ex, ey - sc * 0.18);
+        ctx.quadraticCurveTo(ex - sc * 0.10, ey - sc * 0.06, ex - sc * 0.26, ey + sc * 0.42);
+        ctx.quadraticCurveTo(ex, ey + sc * 0.52, ex + sc * 0.26, ey + sc * 0.42);
+        ctx.quadraticCurveTo(ex + sc * 0.10, ey - sc * 0.06, ex, ey - sc * 0.18);
+        ctx.closePath(); ctx.fill();
+        // raised dancing arms
+        var swing = Math.sin(t * 0.06 + ei) * 0.45;
+        ctx.strokeStyle = 'hsla(' + hueA.toFixed(0) + ',95%,66%,' + (0.5 * pulse).toFixed(3) + ')';
+        ctx.lineWidth = sc * 0.06; ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(ex - sc * 0.06, ey - sc * 0.10); ctx.lineTo(ex - sc * 0.32, ey - sc * 0.28 - swing * sc * 0.22);
+        ctx.moveTo(ex + sc * 0.06, ey - sc * 0.10); ctx.lineTo(ex + sc * 0.32, ey - sc * 0.28 + swing * sc * 0.22);
+        ctx.stroke();
+        // head
+        ctx.fillStyle = 'hsla(' + hueE.toFixed(0) + ',80%,82%,' + (0.85 * pulse).toFixed(3) + ')';
+        ctx.beginPath(); ctx.arc(ex, ey - sc * 0.30, sc * 0.13, 0, 6.2832); ctx.fill();
+        // pointed elf ears
+        ctx.beginPath();
+        ctx.moveTo(ex - sc * 0.11, ey - sc * 0.32); ctx.lineTo(ex - sc * 0.23, ey - sc * 0.40); ctx.lineTo(ex - sc * 0.09, ey - sc * 0.26); ctx.closePath();
+        ctx.moveTo(ex + sc * 0.11, ey - sc * 0.32); ctx.lineTo(ex + sc * 0.23, ey - sc * 0.40); ctx.lineTo(ex + sc * 0.09, ey - sc * 0.26); ctx.closePath();
+        ctx.fill();
+        // tall pointed hat with a bent, wobbling tip (complementary hue)
+        var tipw = Math.sin(t * 0.05 + ei * 1.3) * sc * 0.16;
+        ctx.fillStyle = 'hsla(' + hueB.toFixed(0) + ',92%,60%,' + (0.7 * pulse).toFixed(3) + ')';
+        ctx.beginPath();
+        ctx.moveTo(ex - sc * 0.15, ey - sc * 0.37);
+        ctx.quadraticCurveTo(ex + tipw * 0.5, ey - sc * 0.66, ex + tipw, ey - sc * 0.74);
+        ctx.quadraticCurveTo(ex + sc * 0.04, ey - sc * 0.60, ex + sc * 0.15, ey - sc * 0.37);
+        ctx.closePath(); ctx.fill();
+        // a star twinkling on the hat tip (snaps with the beat)
+        ctx.fillStyle = 'hsla(' + ((hue + 90) % 360).toFixed(0) + ',100%,86%,' + (0.7 * pulse).toFixed(3) + ')';
+        ctx.beginPath(); ctx.arc(ex + tipw, ey - sc * 0.74, sc * 0.05 * (1 + k * 0.5), 0, 6.2832); ctx.fill();
+        // orbiting fairy sparkles
+        for (var sp = 0; sp < 4; sp++) {
+          var sa = t * 0.045 + sp * 1.5708 + ei;
+          var srad = sc * (0.55 + 0.16 * Math.sin(t * 0.05 + sp + ei));
+          var spx = ex + Math.cos(sa) * srad;
+          var spy = (ey - sc * 0.08) + Math.sin(sa) * srad * 0.7;
+          var spA = 0.25 + 0.3 * (0.5 + 0.5 * Math.sin(t * 0.07 + sp * 2 + ei));
+          ctx.fillStyle = 'hsla(' + ((hue + sp * 40) % 360).toFixed(0) + ',95%,80%,' + spA.toFixed(3) + ')';
+          ctx.beginPath(); ctx.arc(spx, spy, sc * 0.045, 0, 6.2832); ctx.fill();
+        }
+      }
       ctx.globalCompositeOperation = 'source-over';
       var vg = ctx.createRadialGradient(cx, cy, Math.min(W, H) * 0.30, cx, cy, Math.max(W, H) * 0.78);
       vg.addColorStop(0, 'rgba(0,0,0,0)');
