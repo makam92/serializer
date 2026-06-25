@@ -367,7 +367,11 @@ class AirPlayCaster {
     // ~0.8s play threshold (maxSize/2). One resampler governs the shared buffer.
     if (this.resampleEnabled && this._airtunes && this._airtunes.circularBuffer) {
       const targetFrames = (this._airtunes.circularBuffer.maxSize / 2) / 4;
-      this._resampler = new DriftResampler({ channels: 2, targetFrames, maxAdjust: 0.004, ki: 0 });
+      // PI loop. ki (≈kp/120, integral time ~2min) nulls the P-only standing offset
+      // and tracks a *growing* drift to zero steady error — P-only alone lagged a
+      // drift that climbed to ~900ppm mid-session, letting the buffer slowly sink.
+      // Anti-windup + the ±maxAdjust clamp keep it safe.
+      this._resampler = new DriftResampler({ channels: 2, targetFrames, maxAdjust: 0.004, ki: 3e-9 });
       this._fillEma = targetFrames;
     }
     if (this._driftLog) console.log(`[airplay-drift] control loop started — adaptive resampler ${this._resampler ? 'ON' : 'OFF'}`);
