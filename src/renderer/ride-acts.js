@@ -298,71 +298,69 @@ export const RIDE_ACTS = [
         ctx.fillStyle = 'rgba(255,242,210,' + (fa * 0.6).toFixed(3) + ')';
         ctx.beginPath(); ctx.arc(fx, fy, frad * 0.5, 0, 6.2832); ctx.fill();
       }
-      // ---- a green tree (silhouette) with little elves that peek out from behind it ----
+      // ---- a spread-out background forest of soft tree silhouettes; the odd elf peeks out ----
       ctx.globalCompositeOperation = 'source-over';
-      var tx = cx - W * 0.05;                          // tree position
-      var tCY = H * 0.42;                              // canopy centre
-      var R0 = W * 0.135;                              // main canopy radius
-      var lobes = [                                    // bushy canopy: [x, y, r]
-        [tx, tCY, R0],
-        [tx - W * 0.105, tCY + H * 0.05, R0 * 0.66],
-        [tx + W * 0.105, tCY + H * 0.05, R0 * 0.66],
-        [tx, tCY - H * 0.085, R0 * 0.62],
-      ];
-      // Elves peek out from behind the canopy (drawn FIRST so the tree occludes the
-      // hidden part). Each: [lobeIndex, dirX, dirY, periodFrames, offsetFrames] — they're
-      // hidden most of the cycle and pop out for a short window, staggered.
-      var elves = [
-        [1, -1, 0.15, 540, 40],
-        [2, 1, 0.12, 690, 300],
-        [0, -0.5, 1, 610, 180],
-        [3, 0.4, -1, 770, 470],
-      ];
-      for (var qi = 0; qi < elves.length; qi++) {
-        var Ev = elves[qi], lo = lobes[Ev[0]];
-        var dl = Math.hypot(Ev[1], Ev[2]) || 1, dx = Ev[1] / dl, dy = Ev[2] / dl;
-        var hr = lo[2] * 0.22;                                              // head radius
-        var cyc = fr((t + Ev[4]) / Ev[3]);
-        var peek = cyc < 0.22 ? Math.sin((cyc / 0.22) * Math.PI) : 0;       // smooth pop, hidden the rest
-        if (peek <= 0.02) continue;
-        var ox = (peek * 2.2 - 1.0) * hr;                                   // hidden(−hr) → out(+1.2hr)
-        var px = lo[0] + dx * (lo[2] + ox), py = lo[1] + dy * (lo[2] + ox);
-        var ehue = (qi * 80 + 25) % 360;
-        ctx.fillStyle = 'hsl(' + ehue + ',72%,55%)';                        // pointed hat
-        ctx.beginPath();
-        ctx.moveTo(px - hr * 0.95, py - hr * 0.45);
-        ctx.quadraticCurveTo(px + hr * 0.2, py - hr * 2.4, px + hr * 0.95, py - hr * 0.45);
-        ctx.closePath(); ctx.fill();
-        ctx.fillStyle = 'rgb(150,176,120)';                                 // pointed ears
-        ctx.beginPath();
-        ctx.moveTo(px - hr * 0.78, py - hr * 0.05); ctx.lineTo(px - hr * 1.35, py - hr * 0.5); ctx.lineTo(px - hr * 0.5, py + hr * 0.45); ctx.closePath();
-        ctx.moveTo(px + hr * 0.78, py - hr * 0.05); ctx.lineTo(px + hr * 1.35, py - hr * 0.5); ctx.lineTo(px + hr * 0.5, py + hr * 0.45); ctx.closePath();
-        ctx.fill();
-        ctx.fillStyle = 'rgb(198,214,162)';                                 // head
-        ctx.beginPath(); ctx.arc(px, py, hr, 0, 6.2832); ctx.fill();
-        ctx.fillStyle = 'rgb(18,26,16)';                                    // eyes, looking out
-        var gx = px + dx * hr * 0.22, gy = py + dy * hr * 0.22 + hr * 0.08;
-        ctx.beginPath(); ctx.arc(gx - hr * 0.30, gy, hr * 0.13, 0, 6.2832); ctx.fill();
-        ctx.beginPath(); ctx.arc(gx + hr * 0.30, gy, hr * 0.13, 0, 6.2832); ctx.fill();
+      if (!this._foliage) {                              // prebake one soft foliage sprite (reused = cheap, soft edges)
+        var fc = document.createElement('canvas'); fc.width = 96; fc.height = 96;
+        var fxx = fc.getContext('2d');
+        var fgr = fxx.createRadialGradient(48, 48, 0, 48, 48, 48);
+        fgr.addColorStop(0, 'rgba(12,34,22,0.82)');
+        fgr.addColorStop(0.5, 'rgba(9,27,18,0.46)');
+        fgr.addColorStop(1, 'rgba(9,27,18,0)');
+        fxx.fillStyle = fgr; fxx.beginPath(); fxx.arc(48, 48, 48, 0, 6.2832); fxx.fill();
+        this._foliage = fc;
       }
-      // the tree silhouette (greenish), drawn ON TOP so elves emerge from behind it
-      ctx.fillStyle = 'rgba(13,35,23,' + (0.97 * R.alpha).toFixed(3) + ')';
-      var trunkTop = tCY + H * 0.05, trunkBot = H * 0.92, tw = W * 0.026;
-      ctx.beginPath();
-      ctx.moveTo(tx - tw, trunkBot);
-      ctx.quadraticCurveTo(tx - tw * 0.6, trunkTop + H * 0.12, tx - tw * 0.45, trunkTop);
-      ctx.lineTo(tx + tw * 0.45, trunkTop);
-      ctx.quadraticCurveTo(tx + tw * 0.6, trunkTop + H * 0.12, tx + tw, trunkBot);
-      ctx.closePath(); ctx.fill();
-      for (var li = 0; li < lobes.length; li++) { var Lb = lobes[li]; ctx.beginPath(); ctx.arc(Lb[0], Lb[1], Lb[2], 0, 6.2832); ctx.fill(); }
-      // faint green rim so the foliage reads as leaves, not a flat blob
-      ctx.globalCompositeOperation = 'lighter';
-      for (var li2 = 0; li2 < lobes.length; li2++) {
-        var Lc = lobes[li2];
-        var rim = ctx.createRadialGradient(Lc[0], Lc[1] - Lc[2] * 0.35, Lc[2] * 0.4, Lc[0], Lc[1], Lc[2]);
-        rim.addColorStop(0, 'rgba(48,104,64,' + (0.11 * R.alpha).toFixed(3) + ')');
-        rim.addColorStop(1, 'rgba(48,104,64,0)');
-        ctx.fillStyle = rim; ctx.beginPath(); ctx.arc(Lc[0], Lc[1], Lc[2], 0, 6.2832); ctx.fill();
+      var FS = this._foliage;
+      // Trees across the background — smaller/higher toward the centre (keeps the journey
+      // open), bigger/lower at the edges. [xFrac, baseFrac, scale, hasElf, eDirX, eDirY, period, offset]
+      var trees = [
+        [0.06, 0.88, 1.15, 1, -1, 0.2, 2800, 200],
+        [0.17, 0.82, 0.80, 0, 0, 0, 0, 0],
+        [0.28, 0.77, 0.56, 1, 1, 0.2, 3200, 1300],
+        [0.40, 0.74, 0.42, 0, 0, 0, 0, 0],
+        [0.60, 0.74, 0.44, 1, -0.5, 1, 2600, 700],
+        [0.72, 0.77, 0.60, 0, 0, 0, 0, 0],
+        [0.83, 0.82, 0.86, 1, 1, 0.25, 3400, 1900],
+        [0.94, 0.88, 1.18, 0, 0, 0, 0, 0],
+      ];
+      for (var ti = 0; ti < trees.length; ti++) {
+        var Tr = trees[ti], scl = Tr[2];
+        var txp = Tr[0] * W + Math.sin(t * 0.02 + ti) * W * 0.004 * scl;     // gentle sway
+        var byp = Tr[1] * H;
+        var cw = W * 0.052 * scl;                                            // canopy half-width
+        var ccy = byp - H * 0.17 * scl;                                      // canopy centre
+        // elf peeking — behind the foliage, small DARK silhouette, hidden most of the time
+        if (Tr[3]) {
+          var dl = Math.hypot(Tr[4], Tr[5]) || 1, edx = Tr[4] / dl, edy = Tr[5] / dl;
+          var ec = fr((t + Tr[7]) / Tr[6]);
+          var pk = ec < 0.09 ? Math.sin((ec / 0.09) * Math.PI) : 0;          // brief, rare pop-out
+          if (pk > 0.02) {
+            var hr = cw * 0.28;                                              // small head
+            var oo = cw * 0.78 + (pk * 1.9 - 0.8) * hr;
+            var px = txp + edx * oo, py = ccy + edy * oo;
+            ctx.fillStyle = 'rgba(3,9,6,0.92)';
+            ctx.beginPath();                                                 // pointed hat
+            ctx.moveTo(px - hr * 0.95, py - hr * 0.4);
+            ctx.quadraticCurveTo(px + hr * 0.2, py - hr * 2.3, px + hr * 0.9, py - hr * 0.4);
+            ctx.closePath(); ctx.fill();
+            ctx.beginPath();                                                 // pointed ears
+            ctx.moveTo(px - hr * 0.8, py); ctx.lineTo(px - hr * 1.3, py - hr * 0.45); ctx.lineTo(px - hr * 0.5, py + hr * 0.4); ctx.closePath();
+            ctx.moveTo(px + hr * 0.8, py); ctx.lineTo(px + hr * 1.3, py - hr * 0.45); ctx.lineTo(px + hr * 0.5, py + hr * 0.4); ctx.closePath();
+            ctx.fill();
+            ctx.beginPath(); ctx.arc(px, py, hr, 0, 6.2832); ctx.fill();      // head
+          }
+        }
+        // thin soft trunk
+        var trw = cw * 0.13;
+        ctx.fillStyle = 'rgba(6,20,14,0.5)';
+        ctx.fillRect(txp - trw, ccy, trw * 2, byp - ccy);
+        // soft canopy from the prebaked sprite (no per-frame gradients → light + non-solid)
+        var blobs = [[0, 0, 1.3], [-0.72, 0.34, 0.85], [0.72, 0.34, 0.85], [0, -0.52, 0.82]];
+        for (var bi = 0; bi < blobs.length; bi++) {
+          var br = cw * blobs[bi][2];
+          var bbx = txp + blobs[bi][0] * cw, bby = ccy + blobs[bi][1] * cw;
+          ctx.drawImage(FS, bbx - br, bby - br, br * 2, br * 2);
+        }
       }
       ctx.globalCompositeOperation = 'source-over';
       var vg = ctx.createRadialGradient(cx, cy, Math.min(W, H) * 0.30, cx, cy, Math.max(W, H) * 0.78);
