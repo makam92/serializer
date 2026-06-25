@@ -24,6 +24,7 @@
  */
 
 const { spawn } = require('node:child_process');
+const { DriftResampler } = require('./drift-resampler');
 
 const DISCOVER_BROWSE_MS = 2500; // how long to collect Bonjour "Add" records
 const DISCOVER_RESOLVE_MS = 2500;
@@ -225,6 +226,14 @@ class AirPlayCaster {
     this._logTimer = null;
     this._logStart = 0;
     this._logPrev = null;
+
+    // Adaptive resampler (clock-drift correction). Enabled by default; set
+    // AIRPLAY_RESAMPLE=0 to A/B test it off. The control loop is updated slowly
+    // (EMA-smoothed buffer fill, ~1/s) so it tracks the ~500ppm drift, not the
+    // large per-sample jitter. See docs/adaptive-resampling.md.
+    this.resampleEnabled = process.env.AIRPLAY_RESAMPLE !== '0';
+    this._resampler = null;
+    this._fillEma = 0;
   }
 
   /** Lazily construct the AirTunes instance. Returns null if the module can't load. */
@@ -297,9 +306,18 @@ class AirPlayCaster {
   writePcm(buf) {
     if (!this._airtunes || this._devices.size === 0) return;
     const cb = this._airtunes.circularBuffer;
-    if (cb && cb.maxSize && cb.currentSize > cb.maxSize * 0.6) { this._bytesDropped += buf.length; return; } // bound drift
-    this._bytesWritten += buf.length;
-    try { this._airtunes.write(buf); } catch { /* circular buffer closed mid-teardown */ }
+    if (cb && cb.maxSize && cb.currentSize > cb.maxSize * 0.6) { this._bytesDropped += buf.length; return; } // backstop only
+    // Adaptive resampling: trim the chunk by the controller's current ratio so our
+    // production rate tracks the receiver's drain (the ratio is steered slowly in
+    // _driftTick). process() carries fractional state across chunks (click-free).
+    let out = buf;
+    if (this._resampler) {
+      const inp = new Int16Array(buf.buffer, buf.byteOffset, buf.length >> 1);
+      const res = this._resampler.process(inp);
+      out = Buffer.from(res.buffer, res.byteOffset, res.byteLength);
+    }
+    this._bytesWritten += out.length;
+    try { this._airtunes.write(out); } catch { /* circular buffer closed mid-teardown */ }
   }
 
   setVolume(key, volume) {
@@ -340,12 +358,20 @@ class AirPlayCaster {
     this._bytesDropped = 0;
     this._logStart = Date.now();
     this._logPrev = { t: this._logStart, written: 0, dropped: 0, fill: 0 };
-    console.log('[airplay-drift] logging started — fill level + produced/consumed/drift, ~1/s');
+    // Spin up the adaptive resampler for this session, targeting node-airtunes2's
+    // ~0.8s play threshold (maxSize/2). One resampler governs the shared buffer.
+    if (this.resampleEnabled && this._airtunes && this._airtunes.circularBuffer) {
+      const targetFrames = (this._airtunes.circularBuffer.maxSize / 2) / 4;
+      this._resampler = new DriftResampler({ channels: 2, targetFrames, maxAdjust: 0.004, ki: 0 });
+      this._fillEma = targetFrames;
+    }
+    console.log(`[airplay-drift] logging started — adaptive resampler ${this._resampler ? 'ON' : 'OFF'}`);
     this._logTimer = setInterval(() => this._driftTick(), 1000);
     if (this._logTimer.unref) this._logTimer.unref();
   }
 
   _stopDriftLog() {
+    this._resampler = null;
     if (!this._logTimer) return;
     clearInterval(this._logTimer);
     this._logTimer = null;
@@ -377,10 +403,23 @@ class AirPlayCaster {
     const ips = (x) => Math.round(x / dt);            // -> per second
     const ppm = Math.round((drift / dt) / 44100 * 1e6);
     const tSec = Math.round((now - this._logStart) / 1000);
+
+    // Adaptive-resampler control: smooth the (jittery) fill with a ~20s EMA, then
+    // steer the resample ratio toward holding the target. Deliberately slow so it
+    // tracks the ~0.5ms/s drift and ignores the per-sample noise.
+    let ratio = 1;
+    if (this._resampler) {
+      const a = 1 - Math.exp(-dt / 20);
+      this._fillEma += a * (fill - this._fillEma);
+      this._resampler.setFill(this._fillEma);
+      ratio = this._resampler.ratio;
+    }
+
     console.log(
       `[airplay-drift] t=+${tSec}s fill=${(fill / 44100).toFixed(2)}s(${Math.round((fill / maxF) * 100)}%) ` +
       `prod=${ips(prod)}f/s cons=${ips(consumed)}f/s drift=${drift >= 0 ? '+' : ''}${ips(drift)}f/s ` +
-      `(${ppm >= 0 ? '+' : ''}${ppm}ppm) [wrote ${ips(wF)} dropped ${ips(dF)}]`,
+      `(${ppm >= 0 ? '+' : ''}${ppm}ppm) [wrote ${ips(wF)} dropped ${ips(dF)}]` +
+      (this._resampler ? ` | resamp ratio=${ratio.toFixed(5)} ema=${(this._fillEma / 44100).toFixed(2)}s` : ''),
     );
     this._logPrev = { t: now, written: this._bytesWritten, dropped: this._bytesDropped, fill };
   }
