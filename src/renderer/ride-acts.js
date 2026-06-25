@@ -106,10 +106,12 @@ export const RIDE_ACTS = [
       ctx.restore();
       // dark ground plane — AFTER the sun so it occludes everything below the horizon
       ctx.fillStyle = `rgba(7,4,12,${A})`; ctx.fillRect(-W, hy, W * 3, H * 2);
-      // rolling hills on the horizon (drawn last, so the ridgeline crosses in front of the sun)
-      for (let layer = 0; layer < 2; layer++) {
-        const amp = 14 + layer * 12;
-        ctx.fillStyle = `rgba(${16 + layer * 12},${8 + layer * 8},${26 + layer * 16},${((0.7 - layer * 0.22) * A).toFixed(3)})`;
+      // rolling hills — OPAQUE silhouettes so they clearly sit IN FRONT of the sun (they were
+      // semi-transparent, so the bright sun bled through and they read as "behind"). Far ridge
+      // first (lighter/taller, atmospheric), near ridge on top (darker) so it solidly occludes.
+      for (let layer = 1; layer >= 0; layer--) {
+        const amp = 30 + layer * 16;
+        ctx.fillStyle = `rgba(${10 + layer * 14},${5 + layer * 9},${18 + layer * 18},${A.toFixed(3)})`;
         ctx.beginPath(); ctx.moveTo(-W, hy + 2);
         for (let x = -W; x <= W * 2; x += 34) {
           const y = hy - amp * (0.5 + 0.5 * Math.sin(x * 0.011 + R.rideS * 0.15 + layer * 2.3)) - 6 * Math.sin(x * 0.03 + layer);
