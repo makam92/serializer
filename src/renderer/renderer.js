@@ -1420,6 +1420,22 @@ async function makeVizAnalyser() {
   return null; // no audio source — visualizer runs an idle drift
 }
 
+// Auto-hide the cursor + on-screen chrome (close button, hint) after the mouse
+// has been still for a moment — keeps the fullscreen visualizer immersive. Any
+// mouse move brings them straight back.
+let vizIdleTimer = 0;
+const VIZ_IDLE_MS = 2500;
+function armVizIdle() {
+  el.vizOverlay.classList.remove('idle');
+  if (vizIdleTimer) clearTimeout(vizIdleTimer);
+  vizIdleTimer = setTimeout(() => el.vizOverlay.classList.add('idle'), VIZ_IDLE_MS);
+}
+function stopVizIdle() {
+  if (vizIdleTimer) { clearTimeout(vizIdleTimer); vizIdleTimer = 0; }
+  el.vizOverlay.removeEventListener('mousemove', armVizIdle);
+  el.vizOverlay.classList.remove('idle');
+}
+
 async function openVisualizer() {
   if (!visualizer) visualizer = new Visualizer(el.vizCanvas, { ride: true });
   window.visualizer = visualizer; // exposed for debugging / dev capture
@@ -1429,12 +1445,15 @@ async function openVisualizer() {
   // Go true fullscreen (button click is a valid user gesture for the API).
   if (el.vizOverlay.requestFullscreen) el.vizOverlay.requestFullscreen().catch(() => {});
   visualizer.start(await makeVizAnalyser());
+  el.vizOverlay.addEventListener('mousemove', armVizIdle);
+  armVizIdle();
 }
 
 function closeVisualizer() {
   if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
   if (visualizer) visualizer.stop();
   if (vizCleanup) { vizCleanup(); vizCleanup = null; }
+  stopVizIdle();
   el.vizOverlay.hidden = true;
   if (isPlaying) startBackdrop(); // backdrop only while playing
 }
