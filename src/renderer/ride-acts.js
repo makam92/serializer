@@ -104,29 +104,41 @@ export const RIDE_ACTS = [
       ctx.fillStyle = 'rgba(18,7,24,0.92)';
       for (let b = 0; b < 6; b++) { const by = sy + sunR * 0.08 + b * sunR * 0.16; ctx.fillRect(hx - sunR, by, sunR * 2, sunR * 0.06 * (0.6 + b)); }
       ctx.restore();
-      // ---- a hawk soaring across the sky (filled raptor silhouette, smooth gentle wing flex) ----
+      // ---- a hawk soaring random patterns in the sky (wanders + banks to face its heading) ----
       ctx.globalCompositeOperation = 'source-over';
       {
         const s = Math.min(W, H) * 0.05;                                     // half-wingspan
-        const period = W + s * 10;
-        const bx = ((R.t * 1.4 + 160) % period) - s * 5;                     // drifts left → right, loops off-screen
-        const by = hy - H * 0.27 + Math.sin(R.t * 0.010 + 1.3) * H * 0.04;   // soaring, gentle bob
-        const lift = s * (0.30 + 0.10 * Math.sin(R.t * 0.05));               // smooth wing flex (no beat-snap)
+        // Smooth bounded wander: sums of incommensurate sines keep it roaming the
+        // sky (never the same loop twice) and never off-screen.
+        const skyTop = H * 0.09, skyBot = hy - H * 0.05;
+        const midY = (skyTop + skyBot) / 2, halfH = Math.max(20, (skyBot - skyTop) / 2);
+        const wander = (tt) => [
+          W * 0.5 + (0.6 * Math.sin(tt * 0.0125) + 0.4 * Math.sin(tt * 0.0061 + 1.1)) * W * 0.40,
+          midY + (0.6 * Math.cos(tt * 0.0107 + 0.5) + 0.4 * Math.sin(tt * 0.0083 + 2.3)) * halfH,
+        ];
+        const [bx, by] = wander(R.t);
+        const [nx, ny] = wander(R.t + 6);                                    // look ahead → stable heading
+        const heading = Math.atan2(ny - by, nx - bx);
+        const lift = s * (0.30 + 0.10 * Math.sin(R.t * 0.05));               // smooth wing flex
+        ctx.save();
+        ctx.translate(bx, by);
+        ctx.rotate(heading + Math.PI / 2);                                   // head (drawn up) faces travel
         ctx.fillStyle = `rgba(12,7,16,${(0.92 * A).toFixed(3)})`;
         ctx.beginPath();
-        ctx.moveTo(bx, by - s * 0.34);                                                              // head
-        ctx.quadraticCurveTo(bx + s * 0.16, by - s * 0.20, bx + s * 0.30, by - s * 0.12);           // R shoulder
-        ctx.quadraticCurveTo(bx + s * 0.66, by - s * 0.10 - lift, bx + s, by - s * 0.04 - lift * 0.7); // R leading edge → tip
-        ctx.quadraticCurveTo(bx + s * 0.96, by + s * 0.04 - lift * 0.2, bx + s * 0.78, by + s * 0.10); // R tip swept back
-        ctx.quadraticCurveTo(bx + s * 0.42, by + s * 0.10, bx + s * 0.14, by + s * 0.18);            // R trailing edge → body
-        ctx.quadraticCurveTo(bx + s * 0.10, by + s * 0.34, bx, by + s * 0.46);                       // → tail tip
-        ctx.quadraticCurveTo(bx - s * 0.10, by + s * 0.34, bx - s * 0.14, by + s * 0.18);            // tail → L body
-        ctx.quadraticCurveTo(bx - s * 0.42, by + s * 0.10, bx - s * 0.78, by + s * 0.10);            // L trailing edge
-        ctx.quadraticCurveTo(bx - s * 0.96, by + s * 0.04 - lift * 0.2, bx - s, by - s * 0.04 - lift * 0.7); // L tip
-        ctx.quadraticCurveTo(bx - s * 0.66, by - s * 0.10 - lift, bx - s * 0.30, by - s * 0.12);     // L leading edge
-        ctx.quadraticCurveTo(bx - s * 0.16, by - s * 0.20, bx, by - s * 0.34);                       // → head
+        ctx.moveTo(0, -s * 0.34);                                            // head
+        ctx.quadraticCurveTo(s * 0.16, -s * 0.20, s * 0.30, -s * 0.12);      // R shoulder
+        ctx.quadraticCurveTo(s * 0.66, -s * 0.10 - lift, s, -s * 0.04 - lift * 0.7);   // R leading edge → tip
+        ctx.quadraticCurveTo(s * 0.96, s * 0.04 - lift * 0.2, s * 0.78, s * 0.10);     // R tip swept back
+        ctx.quadraticCurveTo(s * 0.42, s * 0.10, s * 0.14, s * 0.18);        // R trailing edge → body
+        ctx.quadraticCurveTo(s * 0.10, s * 0.34, 0, s * 0.46);              // → tail tip
+        ctx.quadraticCurveTo(-s * 0.10, s * 0.34, -s * 0.14, s * 0.18);      // tail → L body
+        ctx.quadraticCurveTo(-s * 0.42, s * 0.10, -s * 0.78, s * 0.10);      // L trailing edge
+        ctx.quadraticCurveTo(-s * 0.96, s * 0.04 - lift * 0.2, -s, -s * 0.04 - lift * 0.7); // L tip
+        ctx.quadraticCurveTo(-s * 0.66, -s * 0.10 - lift, -s * 0.30, -s * 0.12);  // L leading edge
+        ctx.quadraticCurveTo(-s * 0.16, -s * 0.20, 0, -s * 0.34);            // → head
         ctx.closePath();
         ctx.fill();
+        ctx.restore();
       }
       // dark ground plane — AFTER the sun so it occludes everything below the horizon
       ctx.fillStyle = `rgba(7,4,12,${A})`; ctx.fillRect(-W, hy, W * 3, H * 2);
