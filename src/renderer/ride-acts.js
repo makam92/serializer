@@ -83,14 +83,13 @@ export const RIDE_ACTS = [
       ctx.save();
       ctx.translate(R.cx, R.cy); ctx.rotate(R.roll); ctx.translate(-R.cx, -R.cy);
       ctx.globalCompositeOperation = 'source-over';
-      // dark ground plane (so the neon grid pops) + warm sky
-      ctx.fillStyle = `rgba(7,4,12,${A})`; ctx.fillRect(-W, hy, W * 3, H * 2);
+      // warm sky (drawn FIRST so the sun sits in front of it)
       const sky = ctx.createLinearGradient(0, hy - H * 1.3, 0, hy);
       sky.addColorStop(0, `rgba(26,12,48,${A})`);
       sky.addColorStop(0.65, `rgba(120,44,84,${A})`);
       sky.addColorStop(1, `rgba(220,112,88,${A})`);
       ctx.fillStyle = sky; ctx.fillRect(-W, hy - H * 1.4, W * 3, H * 1.4);
-      // iconic banded synth sun
+      // iconic banded synth sun — drawn BEFORE the ground + hills so it sets behind them
       const sunR = Math.min(W, H) * 0.15; const sy = hy - sunR * 0.5;
       ctx.globalCompositeOperation = 'lighter';
       const corona = ctx.createRadialGradient(hx, sy, sunR * 0.3, hx, sy, sunR * 2.1);
@@ -105,7 +104,9 @@ export const RIDE_ACTS = [
       ctx.fillStyle = 'rgba(18,7,24,0.92)';
       for (let b = 0; b < 6; b++) { const by = sy + sunR * 0.08 + b * sunR * 0.16; ctx.fillRect(hx - sunR, by, sunR * 2, sunR * 0.06 * (0.6 + b)); }
       ctx.restore();
-      // rolling hills on the horizon
+      // dark ground plane — AFTER the sun so it occludes everything below the horizon
+      ctx.fillStyle = `rgba(7,4,12,${A})`; ctx.fillRect(-W, hy, W * 3, H * 2);
+      // rolling hills on the horizon (drawn last, so the ridgeline crosses in front of the sun)
       for (let layer = 0; layer < 2; layer++) {
         const amp = 14 + layer * 12;
         ctx.fillStyle = `rgba(${16 + layer * 12},${8 + layer * 8},${26 + layer * 16},${((0.7 - layer * 0.22) * A).toFixed(3)})`;
