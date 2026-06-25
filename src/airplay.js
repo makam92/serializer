@@ -234,6 +234,9 @@ class AirPlayCaster {
     this.resampleEnabled = process.env.AIRPLAY_RESAMPLE !== '0';
     this._resampler = null;
     this._fillEma = 0;
+    // Verbose per-second drift logging is opt-in now that the loop is validated
+    // (set AIRPLAY_DRIFT_LOG=1). The control loop itself always runs while streaming.
+    this._driftLog = process.env.AIRPLAY_DRIFT_LOG === '1';
   }
 
   /** Lazily construct the AirTunes instance. Returns null if the module can't load. */
@@ -351,7 +354,9 @@ class AirPlayCaster {
     this.stop([...this._devices.keys()]);
   }
 
-  // ---- Drift instrumentation (temporary; remove once the resampler is tuned) ----
+  // ---- Per-session control loop (drives the adaptive resampler) + opt-in logging ----
+  // The 1/s timer always runs while streaming so the resampler keeps adapting; the
+  // verbose `[airplay-drift]` output is gated behind AIRPLAY_DRIFT_LOG.
   _startDriftLog() {
     if (this._logTimer) return;
     this._bytesWritten = 0;
@@ -365,7 +370,7 @@ class AirPlayCaster {
       this._resampler = new DriftResampler({ channels: 2, targetFrames, maxAdjust: 0.004, ki: 0 });
       this._fillEma = targetFrames;
     }
-    console.log(`[airplay-drift] logging started — adaptive resampler ${this._resampler ? 'ON' : 'OFF'}`);
+    if (this._driftLog) console.log(`[airplay-drift] control loop started — adaptive resampler ${this._resampler ? 'ON' : 'OFF'}`);
     this._logTimer = setInterval(() => this._driftTick(), 1000);
     if (this._logTimer.unref) this._logTimer.unref();
   }
@@ -375,7 +380,7 @@ class AirPlayCaster {
     if (!this._logTimer) return;
     clearInterval(this._logTimer);
     this._logTimer = null;
-    console.log('[airplay-drift] logging stopped');
+    if (this._driftLog) console.log('[airplay-drift] control loop stopped');
   }
 
   /**
@@ -415,12 +420,14 @@ class AirPlayCaster {
       ratio = this._resampler.ratio;
     }
 
-    console.log(
-      `[airplay-drift] t=+${tSec}s fill=${(fill / 44100).toFixed(2)}s(${Math.round((fill / maxF) * 100)}%) ` +
-      `prod=${ips(prod)}f/s cons=${ips(consumed)}f/s drift=${drift >= 0 ? '+' : ''}${ips(drift)}f/s ` +
-      `(${ppm >= 0 ? '+' : ''}${ppm}ppm) [wrote ${ips(wF)} dropped ${ips(dF)}]` +
-      (this._resampler ? ` | resamp ratio=${ratio.toFixed(5)} ema=${(this._fillEma / 44100).toFixed(2)}s` : ''),
-    );
+    if (this._driftLog) {
+      console.log(
+        `[airplay-drift] t=+${tSec}s fill=${(fill / 44100).toFixed(2)}s(${Math.round((fill / maxF) * 100)}%) ` +
+        `prod=${ips(prod)}f/s cons=${ips(consumed)}f/s drift=${drift >= 0 ? '+' : ''}${ips(drift)}f/s ` +
+        `(${ppm >= 0 ? '+' : ''}${ppm}ppm) [wrote ${ips(wF)} dropped ${ips(dF)}]` +
+        (this._resampler ? ` | resamp ratio=${ratio.toFixed(5)} ema=${(this._fillEma / 44100).toFixed(2)}s` : ''),
+      );
+    }
     this._logPrev = { t: now, written: this._bytesWritten, dropped: this._bytesDropped, fill };
   }
 }

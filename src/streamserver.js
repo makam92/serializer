@@ -70,6 +70,18 @@ class StreamServer {
     this.ip = lanIp();
     /** @type {Set<import('node:http').ServerResponse>} */
     this.clients = new Set();
+    // Drift measurement (opt-in via SONOS_DRIFT_LOG=1): socket backlog + produced/
+    // dropped rate, to see whether Sonos drifts like AirPlay did before we build a
+    // correction. NB: Sonos's own ~1-2s buffer is invisible to us, so the socket
+    // backlog is a ONE-SIDED proxy — it reveals over-production (backlog grows /
+    // we drop), but under-production just shows an empty backlog (Sonos rebuffers
+    // on its own). Mirrors the AirPlay drift logger.
+    this._driftLog = process.env.SONOS_DRIFT_LOG === '1';
+    this._producedBytes = 0;
+    this._droppedBytes = 0;
+    this._logTimer = null;
+    this._logStart = 0;
+    this._logPrev = null;
   }
 
   start() {
@@ -98,7 +110,12 @@ class StreamServer {
       res.writeHead(200, { 'Content-Type': 'audio/wav', Connection: 'close' });
       res.write(wavHeader(0)); // open-ended
       this.clients.add(res);
-      const drop = () => { this.clients.delete(res); console.log('[stream] live client left'); };
+      this._startLog();
+      const drop = () => {
+        this.clients.delete(res);
+        console.log('[stream] live client left');
+        if (this.clients.size === 0) this._stopLog();
+      };
       req.on('close', drop);
       res.on('error', drop);
       return;
@@ -116,16 +133,54 @@ class StreamServer {
    * already deep — a brief glitch is far better than ever-growing delay.
    */
   writePcm(buf) {
+    this._producedBytes += buf.length;
     for (const res of this.clients) {
       if (res.writableEnded || res.destroyed) continue;
-      if (res.writableLength > MAX_BUFFERED_BYTES) continue; // drop to bound latency
+      if (res.writableLength > MAX_BUFFERED_BYTES) { this._droppedBytes += buf.length; continue; } // drop to bound latency
       res.write(buf);
     }
   }
 
   hasClients() { return this.clients.size > 0; }
 
+  // ---- Drift measurement (opt-in via SONOS_DRIFT_LOG=1) ----
+  _startLog() {
+    if (!this._driftLog || this._logTimer) return;
+    this._producedBytes = 0;
+    this._droppedBytes = 0;
+    this._logStart = Date.now();
+    this._logPrev = { t: this._logStart, produced: 0, dropped: 0 };
+    console.log('[sonos-drift] logging started');
+    this._logTimer = setInterval(() => this._logTick(), 1000);
+    if (this._logTimer.unref) this._logTimer.unref();
+  }
+
+  _stopLog() {
+    if (!this._logTimer) return;
+    clearInterval(this._logTimer);
+    this._logTimer = null;
+    console.log('[sonos-drift] logging stopped');
+  }
+
+  _logTick() {
+    const now = Date.now();
+    const p = this._logPrev;
+    const dt = (now - p.t) / 1000;
+    if (dt <= 0) return;
+    const prod = (this._producedBytes - p.produced) / BYTES_PER_FRAME;
+    const drop = (this._droppedBytes - p.dropped) / BYTES_PER_FRAME;
+    const ips = (x) => Math.round(x / dt);
+    // Per-client socket backlog as ms of audio (a proxy for how far ahead of the player we are).
+    const backlog = [...this.clients]
+      .map((r) => `${Math.round((r.writableLength / BYTES_PER_FRAME / SAMPLE_RATE) * 1000)}ms`)
+      .join(',') || '-';
+    const tSec = Math.round((now - this._logStart) / 1000);
+    console.log(`[sonos-drift] t=+${tSec}s clients=${this.clients.size} backlog=${backlog} produced=${ips(prod)}f/s dropped=${ips(drop)}f/s`);
+    this._logPrev = { t: now, produced: this._producedBytes, dropped: this._droppedBytes };
+  }
+
   stop() {
+    this._stopLog();
     for (const res of this.clients) { try { res.end(); } catch {} }
     this.clients.clear();
     if (this.server) { try { this.server.close(); } catch {} this.server = null; }
