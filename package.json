@@ -21,21 +21,21 @@
     "files": [
       "**/*",
       "!.claude/**",
+      "!build/**",
       "!docs/**",
       "!dist/**",
       "!**/*.md",
+      "!**/*.node",
       "!**/{.DS_Store,.git,.gitignore,.npmrc}"
-    ],
-    "asarUnpack": [
-      "**/*.node"
     ],
     "mac": {
       "category": "public.app-category.music",
+      "icon": "build/icon.icns",
       "target": [
         {
           "target": "dmg",
           "arch": [
-            "arm64"
+            "universal"
           ]
         }
       ],

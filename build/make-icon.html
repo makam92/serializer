@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><style>html,body{margin:0;background:transparent}</style></head>
+<body>
+<canvas id="c" width="1024" height="1024"></canvas>
+<script>
+const ctx = document.getElementById('c').getContext('2d');
+const S = 1024, cx = S / 2, cy = S / 2;
+
+// --- squircle background (macOS-style rounded panel with transparent corners) ---
+function squircle(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+const m = 92, sz = S - m * 2, rad = 188;
+squircle(m, m, sz, sz, rad);
+const bg = ctx.createLinearGradient(m, m, m, m + sz);
+bg.addColorStop(0, '#1c2128');
+bg.addColorStop(1, '#0b0c0e');
+ctx.fillStyle = bg; ctx.fill();
+// inner amber glow for depth
+ctx.save(); squircle(m, m, sz, sz, rad); ctx.clip();
+const gl = ctx.createRadialGradient(cx, cy, 0, cx, cy, sz * 0.62);
+gl.addColorStop(0, 'rgba(230,160,74,0.20)');
+gl.addColorStop(1, 'rgba(230,160,74,0)');
+ctx.fillStyle = gl; ctx.fillRect(m, m, sz, sz);
+// top sheen
+const sh = ctx.createLinearGradient(m, m, m, m + sz * 0.5);
+sh.addColorStop(0, 'rgba(255,255,255,0.06)');
+sh.addColorStop(1, 'rgba(255,255,255,0)');
+ctx.fillStyle = sh; ctx.fillRect(m, m, sz, sz);
+ctx.restore();
+
+// --- broadcast glyph: concentric rings (sound to every speaker) + a center source ---
+const amber = '#E6A04A', amberBri = '#FFC06A';
+const rings = [[178, 30, 0.92], [288, 24, 0.55], [398, 18, 0.30]];
+ctx.lineCap = 'round';
+for (const [rr, lw, a] of rings) {
+  ctx.beginPath(); ctx.arc(cx, cy, rr, 0, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(230,160,74,' + a + ')'; ctx.lineWidth = lw; ctx.stroke();
+}
+// speaker nodes riding the outer ring
+const outer = 398;
+for (let i = 0; i < 6; i++) {
+  const ang = -Math.PI / 2 + i * (Math.PI * 2 / 6);
+  const x = cx + Math.cos(ang) * outer, y = cy + Math.sin(ang) * outer;
+  ctx.beginPath(); ctx.arc(x, y, 30, 0, Math.PI * 2);
+  ctx.fillStyle = amber; ctx.fill();
+}
+// glowing center source
+const cg = ctx.createRadialGradient(cx, cy, 0, cx, cy, 150);
+cg.addColorStop(0, 'rgba(255,200,110,0.55)');
+cg.addColorStop(1, 'rgba(255,200,110,0)');
+ctx.fillStyle = cg; ctx.beginPath(); ctx.arc(cx, cy, 150, 0, Math.PI * 2); ctx.fill();
+ctx.beginPath(); ctx.arc(cx, cy, 78, 0, Math.PI * 2);
+ctx.fillStyle = amberBri; ctx.fill();
+</script>
+</body></html>

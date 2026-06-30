@@ -19,12 +19,30 @@ until everything lines up. Each speaker also has its own **Volume** and a **Bass
 boost (a low-shelf EQ). All three are **saved per speaker and restored** on the next
 launch, so you only have to tune a room once.
 
-## Requirements
+## Download & install (macOS)
 
-- [Node.js](https://nodejs.org/) 18 or newer (ships with `npm`)
-- macOS, Windows, or Linux
+Grab the latest **`Serializer-<version>-universal.dmg`** from Releases, open it, and
+drag **Serializer** into **Applications**. The build is *universal* — it runs on both
+Apple Silicon and Intel Macs.
 
-## Install & run
+> The app isn't notarized yet, so the **first** launch needs **right-click the app →
+> Open** (then **Open** again) to get past Gatekeeper's "unidentified developer"
+> warning. It opens normally after that.
+
+On first run macOS will ask for two permissions:
+
+- **Microphone** — only to read your output-device *names*, run Auto-sync, and capture
+  live input. No audio is recorded.
+- **Local network** — to discover and stream to Sonos and AirPlay devices.
+
+To broadcast your **system / browser audio** (Live mode) you also need the free
+[BlackHole](https://github.com/ExistentialAudio/BlackHole) loopback driver (see
+*Broadcasting browser / system audio* below). File mode and Sonos/AirPlay work without it.
+
+## Run from source (developers)
+
+Requires [Node.js](https://nodejs.org/) 18+ on **macOS** (the packaged app is macOS-only
+for now — discovery leans on the system `dns-sd`).
 
 ```bash
 git clone https://github.com/makam92/serializer.git
@@ -46,6 +64,26 @@ npm run dev
 
 > First launch will ask for microphone permission — this is only used to reveal the
 > *names* of your output devices (a Chromium quirk); no audio is recorded.
+
+## Building a release (.dmg)
+
+```bash
+npm install
+npm run dist          # → dist/Serializer-<version>-universal.dmg (unsigned)
+```
+
+The build (electron-builder) skips the native rebuild — `node-airtunes2` runs pure-JS
+on macOS — and bakes the required Info.plist keys (microphone, local network, Bonjour).
+To regenerate the app icon after editing `build/make-icon.html`:
+
+```bash
+electron build/make-icon.js   # writes build/icon-1024.png; rebuild build/icon.icns from it
+```
+
+**Signing + notarization** (so it opens without the Gatekeeper warning) needs an Apple
+Developer ID certificate. The hardened-runtime entitlements are already in
+`build/entitlements.mac.plist`; set the usual `CSC_*` / `APPLE_ID` env vars and
+electron-builder signs and notarizes automatically.
 
 ## Scope
 
