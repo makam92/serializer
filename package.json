@@ -6,7 +6,56 @@
   "type": "commonjs",
   "scripts": {
     "start": "electron .",
-    "dev": "electron . --enable-logging"
+    "dev": "electron . --enable-logging",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder"
+  },
+  "build": {
+    "appId": "com.serializer.app",
+    "productName": "Serializer",
+    "npmRebuild": false,
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "**/*",
+      "!.claude/**",
+      "!docs/**",
+      "!dist/**",
+      "!**/*.md",
+      "!**/{.DS_Store,.git,.gitignore,.npmrc}"
+    ],
+    "asarUnpack": [
+      "**/*.node"
+    ],
+    "mac": {
+      "category": "public.app-category.music",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ],
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "Serializer uses the microphone to read your audio device names, auto-measure speaker latency, and capture live input.",
+        "NSLocalNetworkUsageDescription": "Serializer discovers and streams to Sonos and AirPlay speakers on your local network.",
+        "NSBonjourServices": [
+          "_sonos._tcp",
+          "_airplay._tcp",
+          "_raop._tcp"
+        ]
+      }
+    },
+    "dmg": {
+      "title": "Serializer ${version}"
+    }
   },
   "keywords": [
     "audio",
@@ -17,7 +66,8 @@
   "author": "",
   "license": "MIT",
   "devDependencies": {
-    "electron": "^33.0.0"
+    "electron": "^33.0.0",
+    "electron-builder": "^26.15.3"
   },
   "dependencies": {
     "node-airtunes2": "^2.5.0"
