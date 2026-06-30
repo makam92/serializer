@@ -221,9 +221,14 @@ function referenceChannel() {
 }
 
 // ---- Device discovery ----
+let labelsUnlockTried = false;
 async function unlockDeviceLabels() {
-  // Device labels (and input access) stay hidden until an audio permission is
-  // granted once. Request it, then release.
+  // Chromium hides device labels until an audio permission is granted once.
+  // Do this ONCE per session: opening + stopping a mic stream itself fires a
+  // `devicechange`, which re-runs scanDevices — so requesting it on every scan
+  // created a loop (the macOS microphone prompt repeating in a packaged build).
+  if (labelsUnlockTried) return;
+  labelsUnlockTried = true;
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     stream.getTracks().forEach((t) => t.stop());
@@ -1492,7 +1497,8 @@ el.seek.addEventListener('mousedown', () => { seeking = true; });
 el.seek.addEventListener('input', () => { el.timeCurrent.textContent = fmtTime((Number(el.seek.value) / 1000) * durationSec); });
 el.seek.addEventListener('change', () => { seekTo(Number(el.seek.value) / 1000); seeking = false; });
 
-navigator.mediaDevices.addEventListener('devicechange', scanDevices);
+// Debounce: `devicechange` can fire in rapid bursts (Bluetooth/AirPlay flapping).
+navigator.mediaDevices.addEventListener('devicechange', debounce(scanDevices, 500));
 
 // Release the live input + AudioContexts and stop the network broadcasts when the
 // window unloads (the main process also stops Sonos/AirPlay as a backstop).
