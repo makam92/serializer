@@ -69,21 +69,28 @@ npm run dev
 
 ```bash
 npm install
-npm run dist          # → dist/Serializer-<version>-universal.dmg (unsigned)
+npm run dist          # → dist/Serializer-<version>-universal.dmg (ad-hoc signed)
 ```
 
 The build (electron-builder) skips the native rebuild — `node-airtunes2` runs pure-JS
 on macOS — and bakes the required Info.plist keys (microphone, local network, Bonjour).
+
+The app is **ad-hoc signed** (`mac.identity: "-"`). This isn't an Apple identity — so
+Gatekeeper still shows the "unidentified developer" warning on first launch — but it
+gives the app a *stable code signature*, which macOS needs to **remember the Microphone
+and Local Network grants across launches**. Without it the OS re-prompts every launch.
 To regenerate the app icon after editing `build/make-icon.html`:
 
 ```bash
 electron build/make-icon.js   # writes build/icon-1024.png; rebuild build/icon.icns from it
 ```
 
-**Signing + notarization** (so it opens without the Gatekeeper warning) needs an Apple
-Developer ID certificate. The hardened-runtime entitlements are already in
-`build/entitlements.mac.plist`; set the usual `CSC_*` / `APPLE_ID` env vars and
-electron-builder signs and notarizes automatically.
+**Developer ID signing + notarization** (so it opens with a plain double-click, no
+Gatekeeper warning) needs a paid Apple Developer account. To switch from ad-hoc to a
+real identity: set `mac.hardenedRuntime` back to `true` (notarization requires it — the
+entitlements in `build/entitlements.mac.plist` are already prepared), remove the
+`mac.identity: "-"` override, and set the usual `CSC_*` / `APPLE_ID` env vars —
+electron-builder then signs and notarizes automatically.
 
 ## Scope
 
